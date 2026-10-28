@@ -2,11 +2,11 @@
 import type { TranscriptionMode } from '../components/settings/ModeCards.vue'
 import type { OutputMethod, PostProcessor, Provider, SelectOption } from '../types'
 import { invoke } from '@tauri-apps/api/core'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import AppSelect from '../components/AppSelect.vue'
 import AppSlider from '../components/AppSlider.vue'
 import CloudProviderConfig from '../components/settings/CloudProviderConfig.vue'
-import LocalWhisperConfig from '../components/settings/LocalWhisperConfig.vue'
+import LocalModelsConfig from '../components/settings/LocalModelsConfig.vue'
 import ModeCards from '../components/settings/ModeCards.vue'
 import PostProcessingConfig from '../components/settings/PostProcessingConfig.vue'
 import ToggleSwitch from '../components/settings/ToggleSwitch.vue'
@@ -42,27 +42,6 @@ const showStreamingToggle = computed(() => {
     return false
   return baseProvider.value === 'openai' || baseProvider.value === 'deepgram'
 })
-
-// Whisper model validation (for local provider)
-const whisperModelValid = ref(false)
-
-// Watch for provider changes to validate model
-watch(provider, async () => {
-  if (isLocalProvider(provider.value)) {
-    try {
-      // Validate the model for the current local provider
-      if (provider.value === 'local-whisper') {
-        whisperModelValid.value = await invoke<boolean>('is_whisper_model_valid')
-      }
-      else if (provider.value === 'local-parakeet') {
-        whisperModelValid.value = await invoke<boolean>('is_parakeet_model_valid')
-      }
-    }
-    catch {
-      whisperModelValid.value = false
-    }
-  }
-}, { immediate: true })
 
 // Cloud provider options for dropdown (loaded from backend for correct order)
 const cloudProviderOptions = ref<SelectOption[]>([])
@@ -124,9 +103,9 @@ function handleModeChange(mode: TranscriptionMode) {
     }
   }
   else {
-    // Switch to local-parakeet (recommended) if currently on cloud
+    // Switch to local transcription if currently on cloud
     if (!isLocalProvider(provider.value)) {
-      settingsStore.setProvider('local-parakeet')
+      settingsStore.setProvider('local')
     }
   }
 }
@@ -224,26 +203,13 @@ function handleChunkDurationChange(value: number) {
   settingsStore.setChunkDuration(value)
 }
 
-// Model path settings (for local mode)
-const isParakeet = computed(() => provider.value === 'local-parakeet')
-const parakeetModelPath = computed(() => settingsStore.state.transcription.local_models.parakeet_path)
-const whisperModelPath = computed(() => settingsStore.state.transcription.local_models.whisper_path)
-const currentModelPath = computed(() =>
-  isParakeet.value ? parakeetModelPath.value : whisperModelPath.value,
-)
-const modelPathPlaceholder = computed(() =>
-  isParakeet.value ? '/path/to/parakeet-model-dir' : '/path/to/model.bin',
-)
+// Custom model path override (falls back to the catalog selection when empty)
+const customModelPath = computed(() => settingsStore.state.transcription.local_models.custom_path)
 const modelPathUnlocked = ref(false)
 
 function handleModelPathChange(event: Event) {
-  const value = (event.target as HTMLInputElement).value || null
-  if (isParakeet.value) {
-    settingsStore.setParakeetModelPath(value)
-  }
-  else {
-    settingsStore.setWhisperModelPath(value)
-  }
+  const value = (event.target as HTMLInputElement).value
+  settingsStore.setLocalModelPath(value.length > 0 ? value : null)
 }
 
 // Config file path
@@ -314,6 +280,11 @@ const keepModelLoaded = computed(() => settingsStore.state.ui.model_memory.keep_
 const unloadAfterMinutes = computed(() => settingsStore.state.ui.model_memory.unload_after_minutes)
 const ollamaKeepAlive = computed(() => settingsStore.state.services.ollama.keep_alive)
 
+// Storage settings
+const historyEnabled = computed(() => settingsStore.state.ui.history.enabled)
+const historyMaxEntries = computed(() => settingsStore.state.ui.history.max_entries)
+const lastAudioEnabled = computed(() => settingsStore.state.ui.last_audio.enabled)
+
 // Conditional visibility states
 const isLocalMode = computed(() => transcriptionMode.value === 'local')
 const isOllamaPostProcessor = computed(() =>
@@ -335,6 +306,18 @@ const ollamaKeepAliveOptions: SelectOption[] = [
   { value: '30m', label: '30 min' },
   { value: '-1', label: 'Forever' },
 ]
+
+const historyLimitOptions: SelectOption[] = [
+  { value: '100', label: '100 entries' },
+  { value: '500', label: '500 entries' },
+  { value: '1000', label: '1000 entries' },
+  { value: '0', label: 'Unlimited' },
+]
+
+function handleHistoryLimitChange(value: string | null) {
+  if (value !== null)
+    settingsStore.setHistoryMaxEntries(Number.parseInt(value, 10))
+}
 
 function handleKeepModelLoadedChange(value: boolean) {
   settingsStore.setKeepModelLoaded(value)
@@ -380,11 +363,10 @@ function handleOllamaKeepAliveChange(value: string | null) {
           @update:api-key="handleApiKeyUpdate"
         />
 
-        <!-- Local Transcription Config (Whisper or Parakeet) -->
-        <LocalWhisperConfig
+        <!-- Local model picker and download -->
+        <LocalModelsConfig
           v-if="transcriptionMode === 'local'"
           :show-config-card="true"
-          :provider="provider"
         />
 
         <!-- Transcription Section -->
@@ -498,6 +480,46 @@ function handleOllamaKeepAliveChange(value: string | null) {
           </div>
         </div>
 
+        <!-- Storage Section -->
+        <div class="settings-section">
+          <p class="section-label">
+            storage
+          </p>
+
+          <div class="field-row">
+            <label>Save Transcripts</label>
+            <ToggleSwitch
+              :model-value="historyEnabled"
+              @update:model-value="settingsStore.setHistoryEnabled"
+            />
+          </div>
+
+          <div v-if="historyEnabled" class="field-row">
+            <label>History Entries</label>
+            <AppSelect
+              :model-value="String(historyMaxEntries)"
+              :options="historyLimitOptions"
+              @update:model-value="handleHistoryLimitChange"
+            />
+          </div>
+
+          <div class="field-row">
+            <label>Save Last Recording</label>
+            <ToggleSwitch
+              :model-value="lastAudioEnabled"
+              @update:model-value="settingsStore.setLastAudioEnabled"
+            />
+          </div>
+
+          <p class="env-hint">
+            <span class="hint-marker">[i]</span>
+            Transcripts and the last recording are stored as files in the whis data folder.
+            <router-link to="/history">
+              Open history
+            </router-link>
+          </p>
+        </div>
+
         <!-- Advanced Section (collapsed by default) -->
         <details class="settings-section advanced-section" :open="advancedOpen" @toggle="advancedOpen = ($event.target as HTMLDetailsElement).open">
           <summary class="section-label clickable">
@@ -527,8 +549,8 @@ function handleOllamaKeepAliveChange(value: string | null) {
                 <input
                   type="text"
                   class="text-input"
-                  :value="currentModelPath"
-                  :placeholder="modelPathPlaceholder"
+                  :value="customModelPath ?? ''"
+                  placeholder="Use the model selected above"
                   :disabled="!modelPathUnlocked"
                   spellcheck="false"
                   @input="handleModelPathChange"
@@ -613,7 +635,7 @@ function handleOllamaKeepAliveChange(value: string | null) {
 
           <div class="help-section">
             <h3>local transcription</h3>
-            <p><strong>Parakeet:</strong> Fast English-only model. <strong>Whisper:</strong> Multi-language models (75MB-3GB). Fully offline. Larger models = better accuracy, slower processing.</p>
+            <p><strong>Parakeet:</strong> Fast and accurate, best on European languages. <strong>Whisper:</strong> Broad language coverage in several sizes. <strong>Qwen3-ASR, Moonshine:</strong> compact GGUF models for quick notes. Everything runs offline. Larger models are more accurate but slower.</p>
           </div>
 
           <div class="help-section">

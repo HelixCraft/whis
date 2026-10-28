@@ -23,10 +23,16 @@ pub mod state;
 pub mod verbose;
 
 // Re-export audio types
+#[cfg(feature = "history")]
+pub use audio::last_recording::{LastAudioInfo, LastAudioMeta};
 pub use audio::{
     AudioDeviceInfo, AudioRecorder, ChunkerConfig, ProgressiveChunk, ProgressiveChunker,
     RecordingData, VadConfig, list_audio_devices,
 };
+
+// Persistent transcription history
+#[cfg(feature = "history")]
+pub mod history;
 
 // Re-export configuration types
 pub use configuration::{
@@ -42,7 +48,7 @@ pub use transcription::progressive_transcribe_local;
 pub use transcription::{
     DEFAULT_POST_PROCESSING_PROMPT, PostProcessConfig, PostProcessor, WarmupConfig,
     clear_warmup_cache, post_process, preload_ollama, progressive_transcribe_cloud,
-    resolve_post_processor_config, warmup_configured,
+    resolve_post_processor_config, transcribe_samples, warmup_configured,
 };
 
 // Re-export provider types
@@ -54,9 +60,7 @@ pub use provider::is_realtime_provider;
 #[cfg(feature = "local-transcription")]
 pub use provider::preload_parakeet;
 #[cfg(feature = "local-transcription")]
-pub use provider::transcribe_raw;
-#[cfg(feature = "local-transcription")]
-pub use provider::transcribe_raw_parakeet;
+pub use provider::transcribe_local;
 pub use provider::{
     DEFAULT_TIMEOUT_SECS, ProgressCallback, TranscriptionBackend, TranscriptionRequest,
     TranscriptionResult, TranscriptionStage, registry,
@@ -64,9 +68,9 @@ pub use provider::{
 #[cfg(feature = "realtime")]
 pub use provider::{RealtimeTranscriptionBackend, get_realtime_backend};
 #[cfg(feature = "local-transcription")]
-pub use provider::{parakeet_set_keep_loaded, unload_parakeet};
+pub use provider::{local_cpp_preload_model, local_cpp_set_keep_loaded, local_cpp_unload_model};
 #[cfg(feature = "local-transcription")]
-pub use provider::{whisper_preload_model, whisper_set_keep_loaded, whisper_unload_model};
+pub use provider::{parakeet_set_keep_loaded, unload_parakeet};
 
 // Re-export other utility types
 #[cfg(feature = "autotyping")]
@@ -118,6 +122,7 @@ pub mod transcribe {
     pub use crate::transcription::progressive_transcribe_cloud;
     #[cfg(feature = "local-transcription")]
     pub use crate::transcription::progressive_transcribe_local;
+    pub use crate::transcription::transcribe_samples;
 }
 
 #[doc(hidden)]

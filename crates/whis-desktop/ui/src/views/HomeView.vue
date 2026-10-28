@@ -1,19 +1,28 @@
 <script setup lang="ts">
 import type { UnlistenFn } from '@tauri-apps/api/event'
-import type { StatusResponse } from '../types'
+import type { LocalModelInfo, StatusResponse } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import LastAudioCard from '../components/LastAudioCard.vue'
 import { settingsStore } from '../stores/settings'
 
 const status = ref<StatusResponse>({ state: 'Idle', config_valid: false })
 const error = ref<string | null>(null)
+const transcriptionError = ref<string | null>(null)
+const lastAudioAvailable = ref(false)
+const retrying = ref(false)
 const postProcessWarning = ref<string | null>(null)
+const partialText = ref('')
+const localModelLabel = ref<string | null>(null)
 const isPostProcessing = ref(false)
 let pollInterval: number | null = null
 let unlistenPostProcessWarning: UnlistenFn | null = null
 let unlistenPostProcessStarted: UnlistenFn | null = null
 let unlistenTranscriptionComplete: UnlistenFn | null = null
+let unlistenTranscriptionError: UnlistenFn | null = null
+let unlistenLastAudio: UnlistenFn | null = null
+let unlistenPartial: UnlistenFn | null = null
 
 // Configuration readiness state (proactive checks)
 const configReadiness = ref<{
@@ -50,13 +59,9 @@ const configSummary = computed(() => {
   // Mode + Provider
   let mode = 'Cloud'
   let providerName: string = provider
-  if (provider === 'local-whisper') {
+  if (provider === 'local') {
     mode = 'Local'
-    providerName = 'Whisper'
-  }
-  else if (provider === 'local-parakeet') {
-    mode = 'Local'
-    providerName = 'Parakeet'
+    providerName = localModelLabel.value ?? 'Local'
   }
   else {
     // Capitalize cloud provider names
@@ -81,11 +86,28 @@ const canRecord = computed(() => {
     && configReadiness.value.transcriptionReady
 })
 
+// Display name of the selected catalog model, used in the status line
+async function refreshLocalModelLabel() {
+  if (settingsStore.state.transcription.provider !== 'local') {
+    localModelLabel.value = null
+    return
+  }
+  try {
+    const models = await invoke<LocalModelInfo[]>('get_local_models')
+    const selectedId = settingsStore.state.transcription.local_models.selected
+    localModelLabel.value = models.find(model => model.id === selectedId)?.name ?? null
+  }
+  catch {
+    localModelLabel.value = null
+  }
+}
+
 // Check configuration readiness (proactive check for better UX)
 async function checkConfigReadiness() {
   const { transcription, post_processing, services } = settingsStore.state
 
   configReadiness.value.checking = true
+  refreshLocalModelLabel()
   try {
     const result = await invoke<{
       transcription_ready: boolean
@@ -96,8 +118,8 @@ async function checkConfigReadiness() {
       provider: transcription.provider,
       postProcessor: post_processing.processor,
       apiKeys: transcription.api_keys,
-      whisperModelPath: transcription.local_models.whisper_path,
-      parakeetModelPath: transcription.local_models.parakeet_path,
+      localModel: transcription.local_models.selected,
+      localModelPath: transcription.local_models.custom_path,
       ollamaUrl: services.ollama.url,
     })
     configReadiness.value = {
@@ -119,8 +141,8 @@ watch(
   () => [
     settingsStore.state.transcription.provider,
     settingsStore.state.transcription.api_keys,
-    settingsStore.state.transcription.local_models.whisper_path,
-    settingsStore.state.transcription.local_models.parakeet_path,
+    settingsStore.state.transcription.local_models.selected,
+    settingsStore.state.transcription.local_models.custom_path,
     settingsStore.state.post_processing.processor,
     settingsStore.state.services.ollama.url,
   ],
@@ -188,12 +210,38 @@ async function fetchStatus() {
   }
 }
 
+async function refreshLastAudio() {
+  try {
+    lastAudioAvailable.value = (await invoke<{ duration_secs: number } | null>('get_last_audio_info')) !== null
+  }
+  catch {
+    lastAudioAvailable.value = false
+  }
+}
+
+async function retryRetranscription() {
+  retrying.value = true
+  transcriptionError.value = null
+  try {
+    await invoke<string>('retranscribe_last_audio')
+  }
+  catch (e) {
+    transcriptionError.value = String(e)
+  }
+  finally {
+    retrying.value = false
+    await refreshLastAudio()
+  }
+}
+
 async function toggleRecording() {
   if (!canRecord.value)
     return
 
   try {
     error.value = null
+    transcriptionError.value = null
+    partialText.value = ''
     await invoke('toggle_recording')
     await fetchStatus()
   }
@@ -228,7 +276,27 @@ onMounted(async () => {
 
   unlistenTranscriptionComplete = await listen('transcription-complete', () => {
     isPostProcessing.value = false
+    transcriptionError.value = null
+    partialText.value = ''
   })
+
+  // Live preview: merged text of the chunks transcribed so far
+  unlistenPartial = await listen<string>('partial-transcription', (event) => {
+    partialText.value = event.payload
+  })
+
+  unlistenTranscriptionError = await listen<string>('transcription-error', (event) => {
+    isPostProcessing.value = false
+    transcriptionError.value = event.payload
+    partialText.value = ''
+    refreshLastAudio()
+  })
+
+  unlistenLastAudio = await listen('last-audio-updated', () => {
+    refreshLastAudio()
+  })
+
+  await refreshLastAudio()
 })
 
 onUnmounted(() => {
@@ -238,6 +306,9 @@ onUnmounted(() => {
   unlistenPostProcessWarning?.()
   unlistenPostProcessStarted?.()
   unlistenTranscriptionComplete?.()
+  unlistenTranscriptionError?.()
+  unlistenLastAudio?.()
+  unlistenPartial?.()
 })
 </script>
 
@@ -283,6 +354,38 @@ onUnmounted(() => {
             processing audio...
           </span>
         </span>
+      </div>
+
+      <!-- Live preview of the chunks transcribed so far -->
+      <div v-if="partialText && status.state !== 'Idle'" class="live-preview">
+        <p class="live-preview-label">
+          live preview
+        </p>
+        <p class="live-preview-text">
+          {{ partialText }}
+        </p>
+      </div>
+
+      <!-- Last recording card (play / re-transcribe / delete) -->
+      <LastAudioCard class="last-audio" />
+
+      <!-- Transcription failure with retry from the stored recording -->
+      <div v-if="transcriptionError" class="error-msg transcription-error">
+        <p><strong>Transcription failed:</strong> {{ transcriptionError }}</p>
+        <p class="error-hint">
+          The recording was kept.
+          <button
+            v-if="lastAudioAvailable"
+            class="retry-btn"
+            :disabled="retrying"
+            @click="retryRetranscription"
+          >
+            {{ retrying ? 'Retrying...' : 'Retry with last recording' }}
+          </button>
+          <span v-else>
+            Start a new recording or check your settings.
+          </span>
+        </p>
       </div>
 
       <!-- Error message -->
@@ -390,6 +493,35 @@ onUnmounted(() => {
   50% { opacity: 0.4; }
 }
 
+/* Live preview while recording */
+.live-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg-weak);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.live-preview-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-weak);
+  margin: 0;
+}
+
+.live-preview-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  margin: 0;
+  max-height: 120px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+
 /* Shortcut hint */
 .shortcut-hint {
   font-size: 11px;
@@ -438,6 +570,43 @@ onUnmounted(() => {
   border: 1px solid rgba(255, 68, 68, 0.3);
   border-radius: 4px;
 }
+
+.transcription-error p {
+  margin: 0;
+}
+
+.transcription-error .error-hint {
+  margin-top: 6px;
+  color: var(--text-weak);
+}
+
+.retry-btn {
+  margin-left: 6px;
+  padding: 2px 8px;
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--text-strong);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.retry-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.retry-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Last recording card spacing inside the action column */
+.last-audio {
+  margin-top: 4px;
+}
+
 
 /* Warning message (for post-processing warnings) */
 .warning-msg {

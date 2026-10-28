@@ -27,6 +27,27 @@ use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 use whis_core::Settings;
 
+/// Open a file or directory with the system default handler.
+pub(crate) fn open_external_path(path: &std::path::Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("Path does not exist: {}", path.display()));
+    }
+
+    #[cfg(target_os = "linux")]
+    let child = std::process::Command::new("xdg-open").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let child = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(target_os = "windows")]
+    let child = std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(path)
+        .spawn();
+
+    child
+        .map(|_| ())
+        .map_err(|e| format!("Failed to open {}: {e}", path.display()))
+}
+
 /// Save settings to Tauri store (shared helper for all commands)
 pub(crate) fn save_settings_to_store(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let store = app
@@ -42,6 +63,8 @@ pub(crate) fn save_settings_to_store(app: &AppHandle, settings: &Settings) -> Re
 }
 
 pub mod bubble;
+pub mod history;
+pub mod last_audio;
 pub mod models;
 pub mod ollama;
 pub mod presets;
@@ -55,6 +78,10 @@ pub mod validation;
 
 // System commands
 pub use system::*;
+
+// History and last recording commands
+pub use history::*;
+pub use last_audio::*;
 
 // Validation commands
 pub use validation::*;

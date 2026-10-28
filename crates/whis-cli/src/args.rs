@@ -186,7 +186,7 @@ pub enum Commands {
         action: Option<PresetAction>,
     },
 
-    /// List available models (whisper, parakeet, ollama)
+    /// List available models (local, whisper, parakeet, ollama)
     Model {
         #[command(subcommand)]
         action: Option<ModelAction>,
@@ -238,7 +238,7 @@ pub enum ModelAction {
 
 #[derive(Subcommand)]
 pub enum ModelType {
-    /// List available whisper models with install status (default)
+    /// List available whisper models with install status
     Whisper,
 
     /// List available Parakeet models with install status

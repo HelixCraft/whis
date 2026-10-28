@@ -366,10 +366,16 @@ pub async fn start_recording(
     // Spawn transcription task
     // This task will complete when chunk_rx closes (either chunker finishes or fails)
     tokio::spawn(async move {
-        let result =
-            progressive_transcribe_cloud(&provider, &api_key, language.as_deref(), chunk_rx, None)
-                .await
-                .map_err(|e| e.to_string());
+        let result = progressive_transcribe_cloud(
+            &provider,
+            &api_key,
+            language.as_deref(),
+            chunk_rx,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string());
 
         if result_tx.send(result).is_err() {
             warn!("Failed to send transcription result - receiver dropped");

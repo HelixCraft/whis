@@ -42,8 +42,12 @@ audioadapter-buffers = "2.0"
 # Voice Activity Detection using Silero VAD model
 voice_activity_detector = { version = "0.2", optional = true }
 
-# Local transcription via transcribe-rs (unified library for Whisper + Parakeet)
-transcribe-rs = { version = "0.2.1", features = ["whisper", "parakeet"], optional = true }
+# Local ONNX transcription (Parakeet) via transcribe-rs
+transcribe-rs = { version = "0.3", features = ["onnx"], optional = true }
+
+# Whisper (.bin) and GGUF models via transcribe.cpp. Default features are left
+# off so the crate builds the portable CPU backend instead of requiring Metal.
+transcribe-cpp = { version = "0.4.1", default-features = false, optional = true }
 
 # Archive extraction for Parakeet model downloads
 tar = { version = "0.4", optional = true }
@@ -60,7 +64,9 @@ libc = { version = "0.2", optional = true }
 libpulse-binding = { version = "2.28", optional = true }
 
 [features]
-default = ["embedded-encoder", "clipboard", "autotyping", "local-transcription", "vad", "realtime", "pulse-metadata"]
+default = ["embedded-encoder", "clipboard", "autotyping", "local-transcription", "vad", "realtime", "pulse-metadata", "history"]
+# Transcription history and last-recording storage (WAV via hound)
+history = ["hound"]
 # Autotyping into active window (virtual keyboard simulation)
 autotyping = ["enigo"]
 # PulseAudio metadata for better device enumeration (Linux only, graceful fallback)
@@ -70,8 +76,8 @@ embedded-encoder = ["mp3lame-encoder"]
 clipboard = ["arboard"]
 # Mobile TLS: bundled Mozilla CA certs (avoids Android platform verifier JNI issues)
 mobile-tls = ["webpki-roots", "rustls"]
-# Local transcription (Whisper + Parakeet via transcribe-rs)
-local-transcription = ["transcribe-rs", "tar", "flate2", "tempfile", "libc"]
+# Offline transcription (Whisper/GGUF via transcribe.cpp, Parakeet via ONNX)
+local-transcription = ["transcribe-rs", "transcribe-cpp", "tar", "flate2", "tempfile", "libc"]
 # Voice Activity Detection to skip silence during recording
 vad = ["voice_activity_detector"]
 # OpenAI Realtime API for streaming transcription

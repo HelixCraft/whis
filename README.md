@@ -18,7 +18,7 @@
 ## Why?
 
 - **Built for AI workflows** — speak your prompt, paste to OpenCode, Claude, Codex, ...
-- **Cloud or local** — OpenAI, Mistral, Groq, Deepgram, ElevenLabs, or free with local Whisper
+- **Cloud or local** — OpenAI, Mistral, Groq, Deepgram, ElevenLabs, or free with local Whisper, Parakeet, Qwen3-ASR, or Moonshine
 - **Simple** — record → transcribe → clipboard
 
 ## Quick Start
@@ -78,13 +78,10 @@ Or download binaries from [GitHub Releases](https://github.com/frankdierolf/whis
 
 ## Requirements
 
-- API key from [OpenAI](https://platform.openai.com/api-keys), [Mistral](https://console.mistral.ai/api-keys), [Groq](https://console.groq.com/keys), [Deepgram](https://deepgram.com), or [ElevenLabs](https://elevenlabs.io) — or use local Whisper/Parakeet (no API key needed)
-- **Linux only**: Vulkan SDK for local transcription
-  ```bash
-  sudo apt install libvulkan-dev vulkan-tools glslc libshaderc-dev  # Ubuntu/Debian
-  sudo pacman -S vulkan-headers vulkan-tools shaderc                # Arch
-  ```
+- API key from [OpenAI](https://platform.openai.com/api-keys), [Mistral](https://console.mistral.ai/api-keys), [Groq](https://console.groq.com/keys), [Deepgram](https://deepgram.com), or [ElevenLabs](https://elevenlabs.io) — or use a local model from the built-in catalog (no API key needed)
 - Linux (X11/Wayland), macOS, or Windows
+
+Local models run on the CPU, so no GPU setup is required.
 
 **For hotkey mode** (Linux, pick one):
 

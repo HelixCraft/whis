@@ -14,6 +14,8 @@ const VALID_KEYS: &[&str] = &[
     "groq-api-key",
     "deepgram-api-key",
     "elevenlabs-api-key",
+    "local-model",
+    "local-model-path",
     "whisper-model-path",
     "parakeet-model-path",
     "post-processor",
@@ -140,21 +142,30 @@ fn set_config(key: &str, value: &str) -> Result<()> {
             );
             println!("elevenlabs-api-key = {}", mask_key(value_trimmed));
         }
-        "whisper-model-path" => {
-            if value_trimmed.is_empty() {
-                anyhow::bail!("Invalid whisper model path: cannot be empty");
-            }
-            let expanded_path = expand_home_dir(value_trimmed);
-            settings.transcription.local_models.whisper_path = Some(expanded_path.clone());
-            println!("whisper-model-path = {}", expanded_path);
+        "local-model" => {
+            let model = whis_core::model::find(value_trimmed).ok_or_else(|| {
+                let ids: Vec<_> = whis_core::model::all_models()
+                    .iter()
+                    .filter(|m| m.supported)
+                    .map(|m| m.id)
+                    .collect();
+                anyhow!(
+                    "Unknown local model '{}'. Available: {}",
+                    value_trimmed,
+                    ids.join(", ")
+                )
+            })?;
+            settings.transcription.local_models.selected = Some(model.id.to_string());
+            settings.transcription.local_models.custom_path = None;
+            println!("local-model = {}", model.id);
         }
-        "parakeet-model-path" => {
+        "local-model-path" | "whisper-model-path" | "parakeet-model-path" => {
             if value_trimmed.is_empty() {
-                anyhow::bail!("Invalid parakeet model path: cannot be empty");
+                anyhow::bail!("Invalid local model path: cannot be empty");
             }
             let expanded_path = expand_home_dir(value_trimmed);
-            settings.transcription.local_models.parakeet_path = Some(expanded_path.clone());
-            println!("parakeet-model-path = {}", expanded_path);
+            settings.transcription.local_models.custom_path = Some(expanded_path.clone());
+            println!("local-model-path = {}", expanded_path);
         }
         "post-processor" => {
             let processor = value_trimmed
@@ -278,18 +289,18 @@ fn get_config(key: &str) -> Result<()> {
         "groq-api-key" => print_api_key(&settings, &TranscriptionProvider::Groq),
         "deepgram-api-key" => print_api_key(&settings, &TranscriptionProvider::Deepgram),
         "elevenlabs-api-key" => print_api_key(&settings, &TranscriptionProvider::ElevenLabs),
-        "whisper-model-path" => {
-            if let Some(path) = &settings.transcription.local_models.whisper_path {
-                println!("{}", path);
+        "local-model" => {
+            if let Some(model) = settings.transcription.selected_local_model() {
+                println!("{}", model.id);
             } else {
-                println!("(not set, using $LOCAL_WHISPER_MODEL_PATH)");
+                println!("(not set, using $LOCAL_MODEL_PATH)");
             }
         }
-        "parakeet-model-path" => {
-            if let Some(path) = &settings.transcription.local_models.parakeet_path {
+        "local-model-path" | "whisper-model-path" | "parakeet-model-path" => {
+            if let Some(path) = settings.transcription.local_model_path() {
                 println!("{}", path);
             } else {
-                println!("(not set, using $LOCAL_PARAKEET_MODEL_PATH)");
+                println!("(not set, using $LOCAL_MODEL_PATH)");
             }
         }
         "post-processor" => println!("{}", settings.post_processing.processor),
@@ -356,6 +367,10 @@ fn show_all_settings() -> Result<()> {
     );
 
     for provider in TranscriptionProvider::all() {
+        // Local providers use a model file, not an API key.
+        if provider.is_local() {
+            continue;
+        }
         let key_name = format!(
             "{}-api-key",
             provider.to_string().to_lowercase().replace('_', "-")
@@ -375,16 +390,13 @@ fn show_all_settings() -> Result<()> {
 
     println!();
     println!("[Local Models]");
-    if let Some(path) = &settings.transcription.local_models.whisper_path {
-        println!("whisper-model-path = {}", path);
-    } else {
-        println!("whisper-model-path = (not set, using $LOCAL_WHISPER_MODEL_PATH)");
+    match settings.transcription.selected_local_model() {
+        Some(model) => println!("local-model = {}", model.id),
+        None => println!("local-model = (not set)"),
     }
-
-    if let Some(path) = &settings.transcription.local_models.parakeet_path {
-        println!("parakeet-model-path = {}", path);
-    } else {
-        println!("parakeet-model-path = (not set, using $LOCAL_PARAKEET_MODEL_PATH)");
+    match settings.transcription.local_model_path() {
+        Some(path) => println!("local-model-path = {}", path),
+        None => println!("local-model-path = (not set, using $LOCAL_MODEL_PATH)"),
     }
 
     println!();

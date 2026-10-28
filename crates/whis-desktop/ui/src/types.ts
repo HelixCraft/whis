@@ -14,8 +14,7 @@ export type Provider
     | 'deepgram'
     | 'deepgram-realtime'
     | 'elevenlabs'
-    | 'local-whisper'
-    | 'local-parakeet'
+    | 'local'
 
 // OpenAI transcription method
 export type TranscriptionMethod = 'standard' | 'streaming'
@@ -33,8 +32,8 @@ export interface Settings {
     language: string | null
     api_keys: Record<string, string>
     local_models: {
-      whisper_path: string | null
-      parakeet_path: string | null
+      selected: string | null
+      custom_path: string | null
     }
   }
   post_processing: {
@@ -73,6 +72,13 @@ export interface Settings {
     model_memory: {
       keep_model_loaded: boolean
       unload_after_minutes: number
+    }
+    history: {
+      enabled: boolean
+      max_entries: number
+    }
+    last_audio: {
+      enabled: boolean
     }
   }
 }
@@ -116,21 +122,50 @@ export interface SaveSettingsResponse {
   needs_restart: boolean
 }
 
-// Whisper model info from backend
-export interface WhisperModelInfo {
+// Downloadable local model from the backend catalog
+export interface LocalModelInfo {
+  id: string
   name: string
+  engine: string
+  engine_label: string
+  format: string
+  languages: string
+  size_mb: number
+  size_label: string
+  license: string
   description: string
   installed: boolean
+  available: boolean
+  supported: boolean
+  selected: boolean
   path: string
+  note: string
 }
 
-// Parakeet model info from backend
-export interface ParakeetModelInfo {
-  name: string
-  description: string
-  size: string
-  installed: boolean
+// A persisted transcription
+export interface HistoryEntry {
+  id: string
+  created_at_ms: number
+  text: string
+  raw_text: string
+  post_processed: boolean
+  provider: string
+  model: string | null
+  language: string | null
+  duration_secs: number
+  source: 'recording' | 'retranscription'
+  parent_id: string | null
+}
+
+// The most recent recording kept on disk
+export interface LastAudioInfo {
   path: string
+  created_at_ms: number
+  duration_secs: number
+  size_bytes: number
+  provider: string | null
+  model: string | null
+  language: string | null
 }
 
 // Preset info from backend
@@ -160,7 +195,7 @@ export interface CloudProviderInfo {
 
 // Helper to check if provider is local
 export function isLocalProvider(provider: Provider): boolean {
-  return provider === 'local-whisper' || provider === 'local-parakeet'
+  return provider === 'local'
 }
 
 // Normalize provider to base variant (realtime variants → base)

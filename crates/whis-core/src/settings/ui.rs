@@ -86,6 +86,19 @@ pub struct UiSettings {
     #[serde(default)]
     pub model_memory: ModelMemorySettings,
 
+    /// Transcription history settings.
+    ///
+    /// Every completed transcription is appended to a JSONL file on disk.
+    #[serde(default)]
+    pub history: HistorySettings,
+
+    /// Storage of the most recent recording.
+    ///
+    /// Keeping the audio allows re-transcribing it after a failure or after
+    /// switching models.
+    #[serde(default)]
+    pub last_audio: LastAudioSettings,
+
     /// Output method for transcribed text.
     ///
     /// - `clipboard`: Copy to clipboard only (default, current behavior)
@@ -209,12 +222,64 @@ pub struct ModelMemorySettings {
     pub unload_after_minutes: u32,
 }
 
+/// Default number of transcription history entries kept on disk.
+///
+/// Lives here rather than in the history module so settings can carry the
+/// default even in builds without the `history` feature.
+pub const DEFAULT_MAX_HISTORY_ENTRIES: usize = 500;
+
 fn default_keep_model_loaded() -> bool {
     crate::configuration::DEFAULT_KEEP_MODEL_LOADED
 }
 
 fn default_unload_after_minutes() -> u32 {
     crate::configuration::DEFAULT_MODEL_UNLOAD_MINUTES
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_history_entries() -> usize {
+    DEFAULT_MAX_HISTORY_ENTRIES
+}
+
+/// Settings for the persistent transcription history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HistorySettings {
+    /// Store every completed transcription on disk.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Maximum number of entries kept. Oldest entries are pruned.
+    /// 0 disables pruning.
+    #[serde(default = "default_max_history_entries")]
+    pub max_entries: usize,
+}
+
+impl Default for HistorySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entries: default_max_history_entries(),
+        }
+    }
+}
+
+/// Settings for storing the most recent recording.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LastAudioSettings {
+    /// Keep the last recording as a WAV file so it can be re-transcribed.
+    ///
+    /// Disabling this also removes the file that is already stored.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for LastAudioSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 impl Default for ModelMemorySettings {
@@ -237,6 +302,8 @@ impl Default for UiSettings {
             chunk_duration_secs: crate::configuration::DEFAULT_CHUNK_DURATION_SECS,
             bubble: BubbleSettings::default(),
             model_memory: ModelMemorySettings::default(),
+            history: HistorySettings::default(),
+            last_audio: LastAudioSettings::default(),
             #[cfg(feature = "autotyping")]
             output_method: OutputMethod::default(),
             #[cfg(feature = "autotyping")]

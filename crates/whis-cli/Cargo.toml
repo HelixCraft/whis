@@ -35,7 +35,7 @@ hound.workspace = true
 default = ["vad", "local-transcription", "realtime", "hotkey"]
 # Voice Activity Detection to skip silence during recording
 vad = ["whis-core/vad"]
-# Local transcription via transcribe-rs (Whisper + Parakeet models)
+# Offline transcription (Whisper, GGUF, and Parakeet models)
 local-transcription = ["whis-core/local-transcription"]
 # OpenAI Realtime API for streaming transcription
 realtime = ["whis-core/realtime"]

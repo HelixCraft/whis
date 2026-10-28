@@ -30,6 +30,7 @@ const navItems = [
   { name: 'shortcut', label: 'shortcut', path: '/shortcut' },
   { name: 'settings', label: 'settings', path: '/settings' },
   { name: 'presets', label: 'presets', path: '/presets' },
+  { name: 'history', label: 'history', path: '/history' },
   { name: 'about', label: 'about', path: '/about' },
 ]
 

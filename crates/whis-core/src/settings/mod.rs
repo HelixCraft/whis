@@ -55,7 +55,10 @@ pub use post_processing::PostProcessingSettings;
 pub use services::{OllamaConfig, ServicesSettings};
 pub use shortcuts::{CliShortcutMode, ShortcutsSettings};
 pub use transcription::{LocalModelsConfig, TranscriptionSettings};
-pub use ui::{BubbleSettings, ModelMemorySettings, UiSettings, VadSettings};
+pub use ui::{
+    BubbleSettings, DEFAULT_MAX_HISTORY_ENTRIES, HistorySettings, LastAudioSettings,
+    ModelMemorySettings, UiSettings, VadSettings,
+};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

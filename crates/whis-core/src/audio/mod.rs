@@ -37,6 +37,8 @@ pub mod chunker;
 mod devices;
 mod encoder;
 pub mod error;
+#[cfg(feature = "history")]
+pub mod last_recording;
 mod recorder;
 mod types;
 mod vad;

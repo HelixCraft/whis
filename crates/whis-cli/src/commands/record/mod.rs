@@ -132,8 +132,8 @@ async fn progressive_record_and_transcribe(
     #[cfg(feature = "local-transcription")]
     use whis_core::progressive_transcribe_local;
     use whis_core::{
-        AudioRecorder, ChunkerConfig, ProgressiveChunker, Settings, TranscriptionProvider,
-        WarmupConfig, progressive_transcribe_cloud, warmup_configured,
+        AudioRecorder, ChunkerConfig, ProgressiveChunker, Settings, WarmupConfig,
+        progressive_transcribe_cloud, warmup_configured,
     };
 
     // Check if this is a realtime provider (for branching later)
@@ -262,14 +262,21 @@ async fn progressive_record_and_transcribe(
 
             tokio::spawn(async move {
                 #[cfg(feature = "local-transcription")]
-                if provider == TranscriptionProvider::LocalParakeet {
-                    // Local Parakeet progressive transcription
+                if provider.is_local() {
+                    // Local progressive transcription for any catalog model.
                     let model_path = Settings::load_cli()
                         .transcription
-                        .parakeet_model_path()
-                        .ok_or_else(|| anyhow::anyhow!("Parakeet model path not configured"))?;
+                        .local_model_path()
+                        .ok_or_else(|| anyhow::anyhow!("Local model not configured"))?;
 
-                    return progressive_transcribe_local(&model_path, chunk_rx, None).await;
+                    return progressive_transcribe_local(
+                        &model_path,
+                        language.as_deref(),
+                        chunk_rx,
+                        None,
+                        None,
+                    )
+                    .await;
                 }
 
                 // Cloud provider progressive transcription
@@ -278,6 +285,7 @@ async fn progressive_record_and_transcribe(
                     &api_key,
                     language.as_deref(),
                     chunk_rx,
+                    None,
                     None,
                 )
                 .await
@@ -341,19 +349,19 @@ fn preload_models(config: &modes::MicrophoneConfig) {
     {
         let settings = whis_core::Settings::load_cli();
 
-        // Preload the configured local model (Whisper OR Parakeet, not both)
-        match config.provider {
-            whis_core::TranscriptionProvider::LocalWhisper => {
-                if let Some(model_path) = settings.transcription.whisper_model_path() {
-                    whis_core::whisper_preload_model(&model_path);
-                }
-            }
-            whis_core::TranscriptionProvider::LocalParakeet => {
-                if let Some(model_path) = settings.transcription.parakeet_model_path() {
+        // Preload the configured local model (only one engine is active).
+        if config.provider.is_local()
+            && let Some(model_path) = settings.transcription.local_model_path()
+        {
+            match whis_core::model::catalog::engine_for_path(&model_path) {
+                Some(
+                    whis_core::model::ModelEngine::WhisperCpp | whis_core::model::ModelEngine::Gguf,
+                ) => whis_core::local_cpp_preload_model(&model_path),
+                Some(whis_core::model::ModelEngine::Onnx) => {
                     whis_core::preload_parakeet(&model_path);
                 }
+                _ => {}
             }
-            _ => {} // Cloud providers don't need preload
         }
     }
 
@@ -372,7 +380,7 @@ async fn transcribe_file(
     transcription_config: &app::TranscriptionConfig,
     quiet: bool,
 ) -> Result<types::TranscriptionResult> {
-    use whis_core::{TranscriptionProvider, http::get_http_client, provider::TranscriptionRequest};
+    use whis_core::{http::get_http_client, provider::TranscriptionRequest};
 
     if !quiet {
         eprintln!(
@@ -387,25 +395,11 @@ async fn transcribe_file(
     // Handle local vs cloud providers differently
     let text = match &transcription_config.provider {
         #[cfg(feature = "local-transcription")]
-        TranscriptionProvider::LocalParakeet => {
-            let model_path = whis_core::Settings::load_cli()
-                .transcription
-                .parakeet_model_path()
-                .ok_or_else(|| anyhow::anyhow!("Parakeet model path not configured"))?;
-
-            tokio::task::spawn_blocking(move || {
-                whis_core::provider::transcribe_raw_parakeet(&model_path, samples)
-            })
-            .await??
-            .text
-        }
-
-        #[cfg(feature = "local-transcription")]
-        TranscriptionProvider::LocalWhisper => {
+        provider if provider.is_local() => {
             let model_path = transcription_config.api_key.clone();
             let language = transcription_config.language.clone();
             tokio::task::spawn_blocking(move || {
-                whis_core::provider::transcribe_raw(&model_path, &samples, language.as_deref())
+                whis_core::provider::transcribe_local(&model_path, samples, language.as_deref())
             })
             .await??
             .text

@@ -22,19 +22,28 @@ struct ChunkTranscription {
     has_leading_overlap: bool,
 }
 
-/// Merge transcription results, handling overlaps
-fn merge_transcriptions(transcriptions: Vec<ChunkTranscription>) -> String {
+/// Progress callback: `(chunks_done, total_chunks)`. Total is 0 while unknown.
+pub type ChunkProgressCallback = Box<dyn Fn(usize, usize) + Send + Sync>;
+
+/// Live preview callback, called with the merged transcript so far.
+pub type PartialTextCallback = Box<dyn Fn(&str) + Send + Sync>;
+
+/// Merge transcription results, handling overlaps.
+///
+/// Takes a slice so the same function can produce an in-progress preview while
+/// chunks are still arriving.
+fn merge_transcriptions(transcriptions: &[ChunkTranscription]) -> String {
     if transcriptions.is_empty() {
         return String::new();
     }
 
     if transcriptions.len() == 1 {
-        return transcriptions.into_iter().next().unwrap().text;
+        return transcriptions[0].text.clone();
     }
 
     let mut merged = String::new();
 
-    for (i, transcription) in transcriptions.into_iter().enumerate() {
+    for (i, transcription) in transcriptions.iter().enumerate() {
         let text = transcription.text.trim();
 
         if i == 0 {
@@ -71,7 +80,7 @@ fn merge_transcriptions(transcriptions: Vec<ChunkTranscription>) -> String {
 }
 
 /// Remove overlapping text from the beginning of new_text that matches end of existing_text
-fn remove_overlap(existing: &str, new_text: &str) -> String {
+pub(crate) fn remove_overlap(existing: &str, new_text: &str) -> String {
     let existing_words: Vec<&str> = existing.split_whitespace().collect();
     let new_words: Vec<&str> = new_text.split_whitespace().collect();
 
@@ -128,12 +137,14 @@ use crate::audio::chunker::AudioChunk as ProgressiveChunk;
 /// * `language` - Optional language hint
 /// * `chunk_rx` - Channel receiving audio chunks during recording
 /// * `progress_callback` - Optional progress reporting
+/// * `partial_callback` - Optional live preview, called with the merged text so far
 pub async fn progressive_transcribe_cloud(
     provider: &TranscriptionProvider,
     api_key: &str,
     language: Option<&str>,
     mut chunk_rx: tokio::sync::mpsc::UnboundedReceiver<ProgressiveChunk>,
-    progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
+    progress_callback: Option<ChunkProgressCallback>,
+    partial_callback: Option<PartialTextCallback>,
 ) -> Result<String> {
     let client = get_http_client()?;
     let provider_impl = registry().get_by_kind(provider)?;
@@ -173,29 +184,39 @@ pub async fn progressive_transcribe_cloud(
         if let Some(ref callback) = progress_callback {
             callback(chunk_count, 0); // Total is 0 since we don't know how many more chunks will arrive
         }
+        if let Some(ref callback) = partial_callback {
+            callback(&merge_transcriptions(&transcriptions));
+        }
     }
 
     // Results are already in correct order (sequential processing, no sorting needed)
-    Ok(merge_transcriptions(transcriptions))
+    Ok(merge_transcriptions(&transcriptions))
 }
 
-/// Progressive transcription for local providers (Whisper + Parakeet)
+/// Progressive transcription for local models.
 ///
 /// Transcribes audio chunks DURING recording (true progressive). As each 90-second
 /// chunk is produced, it's immediately transcribed using the shared cached model
 /// (sequential processing). The model is loaded once and reused to minimize memory
 /// usage (constant 2GB, compared to 6GB with the previous parallel worker architecture).
 ///
+/// The engine is inferred from the model path.
+///
 /// # Arguments
-/// * `model_path` - Path to local model directory
+/// * `model_path` - Path to the local model file or directory
+/// * `language` - Optional language hint (used by Whisper and Qwen3-ASR)
 /// * `chunk_rx` - Channel receiving audio chunks during recording
 /// * `progress_callback` - Optional progress reporting
+/// * `partial_callback` - Optional live preview, called with the merged text so far
 #[cfg(feature = "local-transcription")]
 pub async fn progressive_transcribe_local(
     model_path: &str,
+    language: Option<&str>,
     mut chunk_rx: tokio::sync::mpsc::UnboundedReceiver<ProgressiveChunk>,
-    progress_callback: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
+    progress_callback: Option<ChunkProgressCallback>,
+    partial_callback: Option<PartialTextCallback>,
 ) -> Result<String> {
+    let language = language.map(str::to_string);
     let mut transcriptions = Vec::new();
     let mut chunk_count = 0;
 
@@ -208,8 +229,9 @@ pub async fn progressive_transcribe_local(
         let model_path_owned = model_path.to_string();
 
         // Run transcription in blocking task (CPU-bound work)
+        let language = language.clone();
         let result = tokio::task::spawn_blocking(move || {
-            crate::provider::transcribe_raw_parakeet(&model_path_owned, samples)
+            crate::provider::transcribe_local(&model_path_owned, samples, language.as_deref())
         })
         .await
         .context("Transcription task panicked")?
@@ -225,14 +247,17 @@ pub async fn progressive_transcribe_local(
         if let Some(ref callback) = progress_callback {
             callback(chunk_count, 0); // Total is 0 since we don't know how many more chunks will arrive
         }
+        if let Some(ref callback) = partial_callback {
+            callback(&merge_transcriptions(&transcriptions));
+        }
     }
 
     // Results are already in correct order (sequential processing, no sorting needed)
-    Ok(merge_transcriptions(transcriptions))
+    Ok(merge_transcriptions(&transcriptions))
 }
 
 /// Convert f32 samples to MP3 bytes
-fn samples_to_mp3(samples: &[f32]) -> Result<Vec<u8>> {
+pub(crate) fn samples_to_mp3(samples: &[f32]) -> Result<Vec<u8>> {
     use crate::audio::create_encoder;
     let encoder = create_encoder();
     encoder

@@ -1,127 +1,82 @@
-//! Model listing commands for whisper, parakeet, and ollama
+//! Model listing commands for local models and ollama
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::time::Duration;
-use whis_core::model::{ModelType, WhisperModel};
+use whis_core::model::{self, ModelEngine};
 use whis_core::ollama;
-
-#[cfg(feature = "local-transcription")]
-use whis_core::model::ParakeetModel;
 
 use crate::args::{ModelAction, ModelType as ModelTypeArg};
 
 /// Run the model command
 pub fn run(action: Option<ModelAction>) -> Result<()> {
     match action {
-        None | Some(ModelAction::List { model_type: None }) => list_whisper_models(),
+        None | Some(ModelAction::List { model_type: None }) => list_all_local_models(),
         Some(ModelAction::List {
             model_type: Some(ModelTypeArg::Whisper),
-        }) => list_whisper_models(),
+        }) => list_engine_models(ModelEngine::WhisperCpp, "whisper"),
         Some(ModelAction::List {
             model_type: Some(ModelTypeArg::Parakeet),
-        }) => list_parakeet_models(),
+        }) => list_engine_models(ModelEngine::Onnx, "Parakeet"),
         Some(ModelAction::List {
             model_type: Some(ModelTypeArg::Ollama { url }),
         }) => list_ollama_models(url),
     }
 }
 
-/// List available whisper models with install status
-fn list_whisper_models() -> Result<()> {
-    println!("Available whisper models:\n");
+/// List every local model, grouped by engine.
+fn list_all_local_models() -> Result<()> {
+    list_engine_models(ModelEngine::WhisperCpp, "whisper")?;
+    list_engine_models(ModelEngine::Onnx, "Parakeet")?;
+    list_engine_models(ModelEngine::Gguf, "GGUF")?;
+    print_models_hint();
+    Ok(())
+}
 
-    // Calculate column widths
-    let name_width = WhisperModel
-        .models()
+/// List the models of one engine with install status.
+fn list_engine_models(engine: ModelEngine, label: &str) -> Result<()> {
+    println!("Available {label} models:\n");
+
+    let models: Vec<_> = model::all_models()
         .iter()
-        .map(|model| model.name.len())
+        .filter(|m| m.engine == engine)
+        .collect();
+
+    let name_width = models
+        .iter()
+        .map(|m| m.name.len())
         .max()
         .unwrap_or(6)
         .max(4);
 
-    // Print header
     println!(
         "{:<name_width$}  STATUS       DESCRIPTION",
         "NAME",
         name_width = name_width
     );
-    println!("{}", "-".repeat(60));
+    println!("{}", "-".repeat(70));
 
-    // Print each model
-    for model in WhisperModel.models() {
-        let path = WhisperModel.default_path(model.name);
-        let status = if WhisperModel.verify(&path) {
-            "[installed]"
-        } else {
-            ""
-        };
-
+    for m in models {
+        let status = if m.is_installed() { "[installed]" } else { "" };
         println!(
-            "{:<name_width$}  {:<11}  {}",
-            model.name,
+            "{:<name_width$}  {:<11}  {} ({})",
+            m.name,
             status,
-            model.description,
+            m.description,
+            m.size_label(),
             name_width = name_width
         );
     }
 
     println!();
-    println!("Models directory: {}", WhisperModel.default_dir().display());
-    println!();
-    println!("To download a model, run: whis setup local");
 
     Ok(())
 }
 
-/// List available Parakeet models with install status
-fn list_parakeet_models() -> Result<()> {
-    println!("Available Parakeet models:\n");
-
-    // Calculate column widths
-    let name_width = ParakeetModel
-        .models()
-        .iter()
-        .map(|model| model.name.len())
-        .max()
-        .unwrap_or(6)
-        .max(4);
-
-    // Print header
-    println!(
-        "{:<name_width$}  STATUS       DESCRIPTION",
-        "NAME",
-        name_width = name_width
-    );
-    println!("{}", "-".repeat(60));
-
-    // Print each model
-    for model in ParakeetModel.models() {
-        let path = ParakeetModel.default_path(model.name);
-        let status = if ParakeetModel.verify(&path) {
-            "[installed]"
-        } else {
-            ""
-        };
-
-        println!(
-            "{:<name_width$}  {:<11}  {}",
-            model.name,
-            status,
-            model.description,
-            name_width = name_width
-        );
-    }
-
-    println!();
-    println!(
-        "Models directory: {}",
-        WhisperModel.default_dir().join("parakeet").display()
-    );
+fn print_models_hint() {
+    println!("Models directory: {}", model::models_dir().display());
     println!();
     println!("To download a model, run: whis setup local");
-
-    Ok(())
 }
 
 /// Response from Ollama /api/tags endpoint

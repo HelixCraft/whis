@@ -26,6 +26,12 @@ const routes = [
     meta: { title: 'Presets' },
   },
   {
+    path: '/history',
+    name: 'history',
+    component: () => import('../views/HistoryView.vue'),
+    meta: { title: 'History' },
+  },
+  {
     path: '/about',
     name: 'about',
     component: () => import('../views/AboutView.vue'),

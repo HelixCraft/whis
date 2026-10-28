@@ -56,8 +56,8 @@ function getDefaultSettings(): Settings {
       language: null,
       api_keys: {},
       local_models: {
-        whisper_path: null,
-        parakeet_path: null,
+        selected: null,
+        custom_path: null,
       },
     },
     post_processing: {
@@ -97,6 +97,13 @@ function getDefaultSettings(): Settings {
         keep_model_loaded: true,
         unload_after_minutes: 10,
       },
+      history: {
+        enabled: true,
+        max_entries: 500,
+      },
+      last_audio: {
+        enabled: true,
+      },
     },
   }
 }
@@ -127,16 +134,10 @@ const state = reactive({
   // Window visibility state (for smooth show/hide transitions)
   windowVisible: false,
 
-  // Download state (not persisted to disk)
-  whisperDownload: {
+  // Download state for local models (not persisted to disk)
+  modelDownload: {
     active: false,
-    model: null as string | null,
-    progress: null as { downloaded: number, total: number } | null,
-    error: null as string | null,
-  },
-  parakeetDownload: {
-    active: false,
-    model: null as string | null,
+    modelId: null as string | null,
     progress: null as { downloaded: number, total: number } | null,
     error: null as string | null,
   },
@@ -191,8 +192,8 @@ async function load() {
       language: settings.transcription.language,
       api_keys: settings.transcription.api_keys || {},
       local_models: {
-        whisper_path: settings.transcription.local_models.whisper_path,
-        parakeet_path: settings.transcription.local_models.parakeet_path,
+        selected: settings.transcription.local_models.selected ?? null,
+        custom_path: settings.transcription.local_models.custom_path ?? null,
       },
     }
     state.post_processing = {
@@ -231,6 +232,13 @@ async function load() {
       model_memory: {
         keep_model_loaded: settings.ui.model_memory?.keep_model_loaded ?? true,
         unload_after_minutes: settings.ui.model_memory?.unload_after_minutes ?? 10,
+      },
+      history: {
+        enabled: settings.ui.history?.enabled ?? true,
+        max_entries: Math.max(0, settings.ui.history?.max_entries ?? 500),
+      },
+      last_audio: {
+        enabled: settings.ui.last_audio?.enabled ?? true,
       },
     }
   }
@@ -325,21 +333,11 @@ async function initialize() {
     } | null>('get_active_download')
 
     if (activeDownload) {
-      if (activeDownload.model_type === 'whisper') {
-        state.whisperDownload.active = true
-        state.whisperDownload.model = activeDownload.model_name
-        state.whisperDownload.progress = {
-          downloaded: activeDownload.downloaded,
-          total: activeDownload.total,
-        }
-      }
-      else if (activeDownload.model_type === 'parakeet') {
-        state.parakeetDownload.active = true
-        state.parakeetDownload.model = activeDownload.model_name
-        state.parakeetDownload.progress = {
-          downloaded: activeDownload.downloaded,
-          total: activeDownload.total,
-        }
+      state.modelDownload.active = true
+      state.modelDownload.modelId = activeDownload.model_name
+      state.modelDownload.progress = {
+        downloaded: activeDownload.downloaded,
+        total: activeDownload.total,
       }
     }
   }
@@ -410,12 +408,12 @@ function setApiKey(provider: string, key: string) {
   state.transcription.api_keys = { ...state.transcription.api_keys, [provider]: key }
 }
 
-function setWhisperModelPath(value: string | null) {
-  state.transcription.local_models.whisper_path = value
+function setLocalModel(value: string | null) {
+  state.transcription.local_models.selected = value
 }
 
-function setParakeetModelPath(value: string | null) {
-  state.transcription.local_models.parakeet_path = value
+function setLocalModelPath(value: string | null) {
+  state.transcription.local_models.custom_path = value
 }
 
 function setPostProcessor(value: PostProcessor) {
@@ -463,6 +461,19 @@ function setUnloadAfterMinutes(value: number) {
   state.ui.model_memory.unload_after_minutes = value
 }
 
+function setHistoryEnabled(value: boolean) {
+  state.ui.history.enabled = value
+}
+
+function setHistoryMaxEntries(value: number) {
+  // 0 disables pruning, so only guard against negative values
+  state.ui.history.max_entries = Math.max(0, Math.floor(value))
+}
+
+function setLastAudioEnabled(value: boolean) {
+  state.ui.last_audio.enabled = value
+}
+
 function setOllamaKeepAlive(value: string | null) {
   state.services.ollama.keep_alive = value
 }
@@ -508,36 +519,29 @@ function setWindowVisible(visible: boolean) {
   state.windowVisible = visible
 }
 
-// Download state management factory
-type DownloadKey = 'whisperDownload' | 'parakeetDownload'
-
-function createDownloadManager(key: DownloadKey) {
-  return {
-    start(model: string) {
-      state[key].active = true
-      state[key].model = model
-      state[key].progress = null
-      state[key].error = null
-    },
-    updateProgress(downloaded: number, total: number) {
-      if (state[key].active) {
-        state[key].progress = { downloaded, total }
-      }
-    },
-    complete() {
-      state[key].active = false
-      state[key].progress = null
-      state[key].model = null
-    },
-    fail(error: string) {
-      state[key].active = false
-      state[key].error = error
-    },
-  }
+// Download state management for local models
+function startModelDownload(modelId: string) {
+  state.modelDownload.active = true
+  state.modelDownload.modelId = modelId
+  state.modelDownload.progress = null
+  state.modelDownload.error = null
 }
 
-const whisperDownload = createDownloadManager('whisperDownload')
-const parakeetDownload = createDownloadManager('parakeetDownload')
+function updateModelDownloadProgress(downloaded: number, total: number) {
+  if (state.modelDownload.active)
+    state.modelDownload.progress = { downloaded, total }
+}
+
+function completeModelDownload() {
+  state.modelDownload.active = false
+  state.modelDownload.progress = null
+  state.modelDownload.modelId = null
+}
+
+function failModelDownload(error: string) {
+  state.modelDownload.active = false
+  state.modelDownload.error = error
+}
 
 // Getter for default provider (used by SettingsView when switching modes)
 function getDefaultProvider(): Provider {
@@ -564,8 +568,8 @@ export const settingsStore = {
   setProvider,
   setLanguage,
   setApiKey,
-  setWhisperModelPath,
-  setParakeetModelPath,
+  setLocalModel,
+  setLocalModelPath,
   setPostProcessor,
   setOllamaUrl,
   setOllamaModel,
@@ -577,6 +581,9 @@ export const settingsStore = {
   setChunkDuration,
   setKeepModelLoaded,
   setUnloadAfterMinutes,
+  setHistoryEnabled,
+  setHistoryMaxEntries,
+  setLastAudioEnabled,
   setOllamaKeepAlive,
   setOutputMethod,
   setWindowVisible,
@@ -588,12 +595,8 @@ export const settingsStore = {
   clearPreset,
 
   // Download state management
-  startWhisperDownload: whisperDownload.start,
-  updateWhisperDownloadProgress: whisperDownload.updateProgress,
-  completeWhisperDownload: whisperDownload.complete,
-  failWhisperDownload: whisperDownload.fail,
-  startParakeetDownload: parakeetDownload.start,
-  updateParakeetDownloadProgress: parakeetDownload.updateProgress,
-  completeParakeetDownload: parakeetDownload.complete,
-  failParakeetDownload: parakeetDownload.fail,
+  startModelDownload,
+  updateModelDownloadProgress,
+  completeModelDownload,
+  failModelDownload,
 }

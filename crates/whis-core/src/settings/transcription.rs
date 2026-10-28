@@ -1,12 +1,9 @@
 //! Transcription settings for provider configuration.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 use crate::config::TranscriptionProvider;
-
-#[cfg(feature = "local-transcription")]
-use crate::model::{ModelType, ParakeetModel};
 
 /// Settings for transcription providers and models.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,17 +38,71 @@ impl Default for TranscriptionSettings {
 }
 
 /// Configuration for local transcription models.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LocalModelsConfig {
-    /// Path to whisper.cpp model file for local transcription
-    /// (e.g., ~/.local/share/whis/models/ggml-small.bin)
+    /// Catalog id of the selected model.
     #[serde(default)]
-    pub whisper_path: Option<String>,
+    pub selected: Option<String>,
 
-    /// Path to Parakeet model directory for local transcription
-    /// (e.g., ~/.local/share/whis/models/parakeet/parakeet-tdt-0.6b-v3-int8)
+    /// Optional user-supplied path that overrides the catalog selection.
     #[serde(default)]
-    pub parakeet_path: Option<String>,
+    pub custom_path: Option<String>,
+}
+
+impl Default for LocalModelsConfig {
+    fn default() -> Self {
+        Self {
+            selected: Some(crate::model::DEFAULT_MODEL_ID.to_string()),
+            custom_path: None,
+        }
+    }
+}
+
+/// Legacy shape with per-engine paths, accepted during deserialization.
+#[derive(Deserialize)]
+struct LocalModelsConfigRaw {
+    #[serde(default)]
+    selected: Option<String>,
+    #[serde(default)]
+    custom_path: Option<String>,
+    #[serde(default)]
+    whisper_path: Option<String>,
+    #[serde(default)]
+    parakeet_path: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for LocalModelsConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = LocalModelsConfigRaw::deserialize(deserializer)?;
+
+        if raw.selected.is_some() || raw.custom_path.is_some() {
+            return Ok(Self {
+                selected: raw.selected,
+                custom_path: raw.custom_path,
+            });
+        }
+
+        // Older settings stored a path per engine. Map known catalog paths to
+        // their id and keep anything else as a custom path so user-provided
+        // models keep working.
+        let legacy_path = raw.whisper_path.or(raw.parakeet_path);
+        Ok(match legacy_path {
+            Some(path) => match crate::model::id_for_path(&path) {
+                Some(id) => Self {
+                    selected: Some(id.to_string()),
+                    custom_path: None,
+                },
+                None => Self {
+                    selected: None,
+                    custom_path: Some(path),
+                },
+            },
+            None => Self {
+                selected: None,
+                custom_path: None,
+            },
+        })
+    }
 }
 
 impl TranscriptionSettings {
@@ -114,42 +165,50 @@ impl TranscriptionSettings {
         self.api_key().is_some()
     }
 
+    /// The selected local catalog model, if any.
+    pub fn selected_local_model(&self) -> Option<&'static crate::model::LocalModelSpec> {
+        self.local_models
+            .selected
+            .as_deref()
+            .and_then(crate::model::find)
+    }
+
     /// Check if the current provider is properly configured.
     ///
     /// For cloud providers: checks for API key
-    /// For LocalWhisper: checks for model path AND that file exists
-    /// For LocalParakeet: checks for model directory AND it's valid
+    /// For local: checks that the selected model exists and is complete
     pub fn is_configured(&self) -> bool {
-        match self.provider {
-            TranscriptionProvider::LocalWhisper => self
-                .whisper_model_path()
-                .map(|p| std::path::Path::new(&p).exists())
-                .unwrap_or(false),
-            #[cfg(feature = "local-transcription")]
-            TranscriptionProvider::LocalParakeet => self
-                .parakeet_model_path()
-                .map(|p| ParakeetModel.verify(std::path::Path::new(&p)))
-                .unwrap_or(false),
-            #[cfg(not(feature = "local-transcription"))]
-            TranscriptionProvider::LocalParakeet => false,
-            _ => self.has_api_key(),
+        if self.provider.is_local() {
+            return self
+                .local_model_path()
+                .is_some_and(|path| match self.selected_local_model() {
+                    Some(model) => model.verify(std::path::Path::new(&path)),
+                    None => std::path::Path::new(&path).exists(),
+                });
         }
+
+        self.has_api_key()
     }
 
-    /// Get the whisper model path, falling back to environment variable.
-    pub fn whisper_model_path(&self) -> Option<String> {
-        self.local_models
-            .whisper_path
-            .clone()
-            .or_else(|| std::env::var("LOCAL_WHISPER_MODEL_PATH").ok())
-    }
+    /// Path of the configured local model.
+    ///
+    /// A custom path wins over the catalog selection. Falls back to the
+    /// `LOCAL_MODEL_PATH` environment variable for CLI users.
+    pub fn local_model_path(&self) -> Option<String> {
+        if let Some(path) = self
+            .local_models
+            .custom_path
+            .as_ref()
+            .filter(|path| !path.is_empty())
+        {
+            return Some(path.clone());
+        }
 
-    /// Get the Parakeet model path, falling back to environment variable.
-    pub fn parakeet_model_path(&self) -> Option<String> {
-        self.local_models
-            .parakeet_path
-            .clone()
-            .or_else(|| std::env::var("LOCAL_PARAKEET_MODEL_PATH").ok())
+        if let Some(model) = self.selected_local_model() {
+            return Some(model.path().to_string_lossy().to_string());
+        }
+
+        std::env::var("LOCAL_MODEL_PATH").ok()
     }
 
     /// Validate transcription settings.
@@ -161,5 +220,38 @@ impl TranscriptionSettings {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_whisper_path_migrates_to_id() {
+        let config: LocalModelsConfig = serde_json::from_str(
+            r#"{"whisper_path":"/home/user/.local/share/whis/models/ggml-small.bin"}"#,
+        )
+        .unwrap();
+        let expected = crate::model::find("whisper-small").unwrap().path();
+        assert_eq!(config.selected.as_deref(), Some("whisper-small"));
+        assert!(config.custom_path.is_none());
+        assert!(expected.ends_with("ggml-small.bin"));
+    }
+
+    #[test]
+    fn unknown_legacy_path_becomes_custom_path() {
+        let config: LocalModelsConfig =
+            serde_json::from_str(r#"{"parakeet_path":"/opt/models/custom"}"#).unwrap();
+        assert!(config.selected.is_none());
+        assert_eq!(config.custom_path.as_deref(), Some("/opt/models/custom"));
+    }
+
+    #[test]
+    fn legacy_provider_names_map_to_local() {
+        let provider: TranscriptionProvider = serde_json::from_str("\"local-parakeet\"").unwrap();
+        assert_eq!(provider, TranscriptionProvider::Local);
+        let provider: TranscriptionProvider = serde_json::from_str("\"local-whisper\"").unwrap();
+        assert_eq!(provider, TranscriptionProvider::Local);
     }
 }

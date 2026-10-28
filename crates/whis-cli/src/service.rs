@@ -339,14 +339,21 @@ impl Service {
 
         let transcription_handle = tokio::spawn(async move {
             #[cfg(feature = "local-transcription")]
-            if provider == TranscriptionProvider::LocalParakeet {
-                // Local Parakeet progressive transcription
+            if provider.is_local() {
+                // Local progressive transcription for any catalog model.
                 let model_path = Settings::load_cli()
                     .transcription
-                    .parakeet_model_path()
-                    .ok_or_else(|| anyhow::anyhow!("Parakeet model path not configured"))?;
+                    .local_model_path()
+                    .ok_or_else(|| anyhow::anyhow!("Local model not configured"))?;
 
-                return whis_core::progressive_transcribe_local(&model_path, chunk_rx, None).await;
+                return whis_core::progressive_transcribe_local(
+                    &model_path,
+                    language.as_deref(),
+                    chunk_rx,
+                    None,
+                    None,
+                )
+                .await;
             }
 
             // Cloud provider progressive transcription
@@ -356,25 +363,24 @@ impl Service {
                 language.as_deref(),
                 chunk_rx,
                 None,
+                None,
             )
             .await
         });
 
         // Preload models in background (same as before)
         #[cfg(feature = "local-transcription")]
+        if self.provider.is_local()
+            && let Some(model_path) = settings.transcription.local_model_path()
         {
-            match self.provider {
-                TranscriptionProvider::LocalWhisper => {
-                    if let Some(model_path) = settings.transcription.whisper_model_path() {
-                        whis_core::whisper_preload_model(&model_path);
-                    }
+            match whis_core::model::catalog::engine_for_path(&model_path) {
+                Some(
+                    whis_core::model::ModelEngine::WhisperCpp | whis_core::model::ModelEngine::Gguf,
+                ) => whis_core::local_cpp_preload_model(&model_path),
+                Some(whis_core::model::ModelEngine::Onnx) => {
+                    whis_core::preload_parakeet(&model_path);
                 }
-                TranscriptionProvider::LocalParakeet => {
-                    if let Some(model_path) = settings.transcription.parakeet_model_path() {
-                        whis_core::preload_parakeet(&model_path);
-                    }
-                }
-                _ => {} // Cloud providers don't need preload
+                _ => {}
             }
         }
 

@@ -31,42 +31,16 @@ pub fn load_transcription_config_with_language(
 
     // Handle different provider types:
     // - Cloud providers: require API key
-    // - LocalWhisper: requires model path
+    // - Local: requires a model path
     let api_key = match &provider {
-        TranscriptionProvider::LocalWhisper => {
-            // Local whisper: use model path
-            match settings.transcription.whisper_model_path() {
-                Some(path) => path,
-                None => {
-                    eprintln!("Error: No whisper model path configured.");
-                    eprintln!("(Required for local Whisper transcription)");
-                    eprintln!("\nSet the model path with:");
-                    eprintln!(
-                        "  whis config --whisper-model-path ~/.local/share/whis/models/ggml-small.bin\n"
-                    );
-                    eprintln!("Or set the LOCAL_WHISPER_MODEL_PATH environment variable.");
-                    eprintln!("\nTip: Run 'whis setup local' for guided setup.");
-                    std::process::exit(1);
-                }
+        TranscriptionProvider::Local => match settings.transcription.local_model_path() {
+            Some(path) => path,
+            None => {
+                eprintln!("Error: No local model configured.");
+                eprintln!("\nRun 'whis setup local' to download a model.");
+                std::process::exit(1);
             }
-        }
-        TranscriptionProvider::LocalParakeet => {
-            // Local parakeet: use model path
-            match settings.transcription.parakeet_model_path() {
-                Some(path) => path,
-                None => {
-                    eprintln!("Error: No parakeet model path configured.");
-                    eprintln!("(Required for local Parakeet transcription)");
-                    eprintln!("\nSet the model path with:");
-                    eprintln!(
-                        "  whis config --parakeet-model-path ~/.local/share/whis/models/parakeet/parakeet-tdt-0.6b-v3-int8\n"
-                    );
-                    eprintln!("Or set the LOCAL_PARAKEET_MODEL_PATH environment variable.");
-                    eprintln!("\nTip: Run 'whis setup local' for guided setup.");
-                    std::process::exit(1);
-                }
-            }
-        }
+        },
         _ => {
             // Cloud providers: require API key
             match settings.transcription.api_key_for(&provider) {

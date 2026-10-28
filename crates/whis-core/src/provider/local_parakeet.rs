@@ -6,47 +6,10 @@
 //! Parakeet models offer high accuracy and speed for speech-to-text.
 
 use anyhow::Result;
-use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use super::{TranscriptionBackend, TranscriptionRequest, TranscriptionResult};
-
-/// Local Parakeet transcription provider
-#[derive(Debug, Default, Clone)]
-pub struct LocalParakeetProvider;
-
-#[async_trait]
-impl TranscriptionBackend for LocalParakeetProvider {
-    fn name(&self) -> &'static str {
-        "local-parakeet"
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Local Parakeet"
-    }
-
-    fn transcribe_sync(
-        &self,
-        _model_path: &str,
-        _request: TranscriptionRequest,
-    ) -> Result<TranscriptionResult> {
-        anyhow::bail!(
-            "File transcription not supported. Use microphone recording with transcribe_raw()."
-        )
-    }
-
-    async fn transcribe_async(
-        &self,
-        _client: &reqwest::Client,
-        _model_path: &str,
-        _request: TranscriptionRequest,
-    ) -> Result<TranscriptionResult> {
-        anyhow::bail!(
-            "File transcription not supported. Use microphone recording with transcribe_raw()."
-        )
-    }
-}
+use super::TranscriptionResult;
 
 /// Transcribe raw f32 samples directly.
 ///
@@ -64,8 +27,6 @@ pub fn transcribe_raw(model_path: &str, samples: Vec<f32>) -> Result<Transcripti
 /// ONNX Runtime has memory constraints with long audio in Parakeet models.
 /// This function automatically chunks audio longer than 90 seconds to avoid ORT errors.
 fn transcribe_samples(model_path: &str, samples: Vec<f32>) -> Result<TranscriptionResult> {
-    use transcribe_rs::engines::parakeet::{ParakeetInferenceParams, TimestampGranularity};
-
     // Empirically tested: Parakeet works well up to ~90 seconds
     // Beyond that, ONNX Runtime can hit memory limits (ORT error)
     const CHUNK_SIZE: usize = 1_440_000; // 90 seconds at 16kHz
@@ -80,14 +41,9 @@ fn transcribe_samples(model_path: &str, samples: Vec<f32>) -> Result<Transcripti
         anyhow::anyhow!("Parakeet engine not loaded (cache empty after get_or_load_engine)")
     })?;
 
-    // Configure inference parameters
-    let params = ParakeetInferenceParams {
-        timestamp_granularity: TimestampGranularity::Segment,
-    };
-
     // If audio is short, transcribe directly (no chunking needed)
     let result = if samples.len() <= CHUNK_SIZE {
-        transcribe_chunk_with_engine(&mut cached.engine, samples, &params)?
+        transcribe_chunk_with_engine(&mut cached.engine, &samples)?
     } else {
         // Split long audio into chunks with overlap
         let mut chunks = Vec::new();
@@ -108,8 +64,7 @@ fn transcribe_samples(model_path: &str, samples: Vec<f32>) -> Result<Transcripti
                 chunk.len() as f32 / 16000.0
             );
 
-            let chunk_result =
-                transcribe_chunk_with_engine(&mut cached.engine, chunk.to_vec(), &params)?;
+            let chunk_result = transcribe_chunk_with_engine(&mut cached.engine, chunk)?;
             results.push(chunk_result.text);
         }
 
@@ -133,16 +88,15 @@ fn transcribe_samples(model_path: &str, samples: Vec<f32>) -> Result<Transcripti
 /// This function is used internally by `transcribe_samples()` to reuse the same
 /// engine instance across multiple chunks, avoiding repeated model loading.
 fn transcribe_chunk_with_engine(
-    engine: &mut transcribe_rs::engines::parakeet::ParakeetEngine,
-    samples: Vec<f32>,
-    params: &transcribe_rs::engines::parakeet::ParakeetInferenceParams,
+    model: &mut transcribe_rs::onnx::parakeet::ParakeetModel,
+    samples: &[f32],
 ) -> Result<TranscriptionResult> {
-    use transcribe_rs::TranscriptionEngine;
+    use transcribe_rs::{SpeechModel, TranscribeOptions};
 
     // Transcribe the audio samples using the pre-loaded engine
     // transcribe-rs expects 16kHz mono samples
-    let result = engine
-        .transcribe_samples(samples, Some(params.clone()))
+    let result = model
+        .transcribe(samples, &TranscribeOptions::default())
         .map_err(|e| anyhow::anyhow!("Parakeet transcription failed: {}", e))?;
 
     Ok(TranscriptionResult {
@@ -161,7 +115,7 @@ static PARAKEET_ENGINE: OnceLock<Mutex<Option<CachedParakeetEngine>>> = OnceLock
 static KEEP_LOADED: AtomicBool = AtomicBool::new(false);
 
 struct CachedParakeetEngine {
-    engine: transcribe_rs::engines::parakeet::ParakeetEngine,
+    engine: transcribe_rs::onnx::parakeet::ParakeetModel,
     path: String,
 }
 
@@ -176,8 +130,8 @@ fn get_cache() -> &'static Mutex<Option<CachedParakeetEngine>> {
 /// and eliminating repeated model loading overhead.
 fn get_or_load_engine(model_path: &str) -> Result<()> {
     use std::path::Path;
-    use transcribe_rs::TranscriptionEngine;
-    use transcribe_rs::engines::parakeet::{ParakeetEngine, ParakeetModelParams};
+    use transcribe_rs::onnx::Quantization;
+    use transcribe_rs::onnx::parakeet::ParakeetModel;
 
     let mut cache = get_cache().lock().unwrap();
 
@@ -190,9 +144,7 @@ fn get_or_load_engine(model_path: &str) -> Result<()> {
 
     // Validate model path
     if model_path.is_empty() {
-        anyhow::bail!(
-            "Parakeet model path not configured. Set LOCAL_PARAKEET_MODEL_PATH or use: whis config --parakeet-model-path <path>"
-        );
+        anyhow::bail!("Parakeet model path not configured. Run 'whis setup local'.");
     }
 
     if !Path::new(model_path).exists() {
@@ -205,9 +157,7 @@ fn get_or_load_engine(model_path: &str) -> Result<()> {
 
     crate::verbose!("Loading Parakeet model: {}", model_path);
 
-    let mut engine = ParakeetEngine::new();
-    engine
-        .load_model_with_params(Path::new(model_path), ParakeetModelParams::int8())
+    let engine = ParakeetModel::load(Path::new(model_path), &Quantization::Int8)
         .map_err(|e| anyhow::anyhow!("Failed to load Parakeet model: {}", e))?;
 
     crate::verbose!("Parakeet model loaded");

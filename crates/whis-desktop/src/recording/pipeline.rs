@@ -1,22 +1,31 @@
 //! Transcription Pipeline
 //!
 //! Orchestrates the full transcription pipeline:
-//! 1. Finalize recording (encode audio)
+//! 1. Finalize recording and persist the audio
 //! 2. Transcribe audio (single or parallel chunks)
 //! 3. Post-process transcription (optional)
-//! 4. Copy to clipboard
-//! 5. Emit completion event
+//! 4. Append to history
+//! 5. Copy to clipboard / autotype
+//! 6. Emit completion event
 
 use crate::state::{AppState, RecordingState};
+use std::path::Path;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
+use whis_core::audio::last_recording;
+use whis_core::history::{self, HistoryEntry, HistorySource};
 use whis_core::{
     AutotypeBackend, ClipboardMethod, DEFAULT_POST_PROCESSING_PROMPT, OutputMethod,
     PostProcessConfig, PostProcessor, TranscriptionProvider, autotype_text, copy_to_clipboard,
     ollama, post_process, warn,
 };
 #[cfg(feature = "local-transcription")]
-use whis_core::{unload_parakeet, whisper_unload_model};
+use whis_core::{local_cpp_unload_model, unload_parakeet};
+
+/// Truncate text for console output without risking a UTF-8 boundary panic.
+fn short(text: &str) -> String {
+    text.chars().take(50).collect()
+}
 
 /// Output text based on configured output method
 fn output_text(
@@ -48,55 +57,178 @@ fn output_text(
 pub async fn stop_and_transcribe(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
 
-    // Stop recording (closes audio stream, signals chunker/transcription to finish)
-    {
-        let mut recorder = state.recorder.lock().unwrap().take();
-        if let Some(ref mut rec) = recorder {
-            rec.stop_recording().map_err(|e| e.to_string())?;
+    // Stop recording. The samples are kept: they are persisted before
+    // transcription so a failed transcription can never lose the audio.
+    let stop_result = {
+        let recorder = state.recorder.lock().unwrap().take();
+        match recorder {
+            Some(mut rec) => rec
+                .stop_recording()
+                .map(|data| data.finalize_raw())
+                .map_err(|e| e.to_string()),
+            None => Err("No active recording".to_string()),
         }
-    }
+    };
+
+    let samples = match stop_result {
+        Ok(samples) => samples,
+        Err(message) => {
+            state.set_state(RecordingState::Idle);
+            let _ = app.emit("transcription-error", &message);
+            return Err(message);
+        }
+    };
+
+    let duration_secs = samples.len() as f32 / 16_000.0;
+    persist_last_audio(app, &state, &samples);
 
     // Update state to transcribing
-    {
-        *state.state.lock().unwrap() = RecordingState::Transcribing;
-    }
+    state.set_state(RecordingState::Transcribing);
     println!("Transcribing...");
 
     // Run transcription with guaranteed state cleanup on any error
-    let result = do_progressive_transcription(app, &state).await;
+    let result = do_progressive_transcription(app, &state, duration_secs).await;
 
     // Always reset state, regardless of success or failure
-    {
-        *state.state.lock().unwrap() = RecordingState::Idle;
+    state.set_state(RecordingState::Idle);
+
+    if let Err(ref e) = result {
+        let _ = app.emit("transcription-error", e.clone());
     }
 
     result
 }
 
-/// Progressive transcription logic - receives result from background task
-async fn do_progressive_transcription(app: &AppHandle, state: &AppState) -> Result<(), String> {
-    // Receive transcription result from background task
-    let rx = {
-        let mut rx_guard = state.transcription_rx.lock().unwrap();
-        rx_guard
-            .take()
-            .ok_or("No progressive transcription in progress")?
+/// Save the most recent recording as a WAV file.
+///
+/// Failures are non-fatal: the transcription still runs, the UI only shows a
+/// warning.
+fn persist_last_audio(app: &AppHandle, state: &AppState, samples: &[f32]) {
+    let enabled = state.with_settings(|s| s.ui.last_audio.enabled);
+    if !enabled {
+        return;
+    }
+
+    let (provider, model, language) = transcription_identity(state);
+
+    match last_recording::save(samples, Some(provider), model, language) {
+        Ok(info) => {
+            let _ = app.emit("last-audio-updated", &info);
+        }
+        Err(e) => {
+            let message = format!("Could not save the last recording: {e}");
+            warn!("{message}");
+            let _ = app.emit("last-audio-warning", &message);
+        }
+    }
+}
+
+/// Provider, model and language currently in effect.
+///
+/// Falls back to settings when no recording cached a config yet (for example
+/// after an app restart before re-transcribing).
+fn transcription_identity(state: &AppState) -> (String, Option<String>, Option<String>) {
+    {
+        let config = state.transcription_config.lock().unwrap();
+        if let Some(c) = config.as_ref() {
+            return (
+                c.provider.as_str().to_string(),
+                model_label(&c.provider, &c.api_key),
+                c.language.clone(),
+            );
+        }
+    }
+
+    let settings = state.settings.lock().unwrap();
+    let provider = settings.transcription.provider.clone();
+    let model_source = if provider.is_local() {
+        settings.transcription.local_model_path()
+    } else {
+        settings.transcription.api_key_from_settings()
     };
+    (
+        provider.as_str().to_string(),
+        model_source
+            .as_deref()
+            .and_then(|value| model_label(&provider, value)),
+        settings.transcription.language.clone(),
+    )
+}
 
-    // Wait for transcription to complete (rx_guard dropped, so this is Send-safe)
-    let transcription = rx
-        .await
-        .map_err(|_| "Transcription task dropped unexpectedly".to_string())?
-        .map_err(|e| format!("Transcription failed: {e}"))?;
+/// Human readable model label for local models.
+fn model_label(provider: &TranscriptionProvider, api_key: &str) -> Option<String> {
+    if !provider.is_local() {
+        return None;
+    }
+    if let Some(id) = whis_core::model::id_for_path(api_key) {
+        return Some(id.to_string());
+    }
+    Path::new(api_key)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+}
 
-    // Extract post-processing config and output settings from settings
-    let (post_process_config, clipboard_method, output_method, autotype_backend, autotype_delay_ms) = {
+/// Transcript produced by one transcription run, before it is stored.
+struct Transcript<'a> {
+    raw: &'a str,
+    final_text: &'a str,
+    post_processed: bool,
+}
+
+/// Persist a history entry. Never fails the pipeline: history is a safety net,
+/// not a requirement for the transcription itself.
+fn record_history(
+    app: &AppHandle,
+    state: &AppState,
+    transcript: Transcript<'_>,
+    duration_secs: f32,
+    source: HistorySource,
+    parent_id: Option<String>,
+) {
+    let (enabled, max_entries) =
+        state.with_settings(|s| (s.ui.history.enabled, s.ui.history.max_entries));
+    if !enabled || transcript.final_text.trim().is_empty() {
+        return;
+    }
+
+    let (provider, model, language) = transcription_identity(state);
+
+    let mut entry = HistoryEntry::new(transcript.final_text, provider);
+    entry.raw_text = transcript.raw.to_string();
+    entry.post_processed = transcript.post_processed;
+    entry.model = model;
+    entry.language = language;
+    entry.duration_secs = duration_secs;
+    entry.source = source;
+    entry.parent_id = parent_id;
+
+    match history::append(&entry, max_entries) {
+        Ok(()) => {
+            if last_recording::path().exists() {
+                last_recording::set_history_id(&entry.id);
+            }
+            let _ = app.emit("history-updated", ());
+        }
+        Err(e) => {
+            warn!("Failed to save transcription history: {e}");
+            let _ = app.emit("history-warning", e.to_string());
+        }
+    }
+}
+
+/// Apply the configured post-processing to a transcript.
+///
+/// Post-processing failures are non-fatal and return the raw text, matching
+/// the behaviour of the recording pipeline.
+pub(crate) async fn post_process_text(
+    app: &AppHandle,
+    state: &AppState,
+    text: &str,
+) -> (String, bool) {
+    let config = {
         let settings = state.settings.lock().unwrap();
-        let clipboard_method = settings.ui.clipboard_backend.clone();
-        let output_method = settings.ui.output_method.clone();
-        let autotype_backend = settings.ui.autotype_backend.clone();
-        let autotype_delay_ms = settings.ui.autotype_delay_ms;
-        let post_process_config = if settings.post_processing.enabled
+        if settings.post_processing.enabled
             && settings.post_processing.processor != PostProcessor::None
         {
             let processor = settings.post_processing.processor.clone();
@@ -132,107 +264,165 @@ async fn do_progressive_transcription(app: &AppHandle, state: &AppState) -> Resu
             })
         } else {
             None
-        };
-        (
-            post_process_config,
-            clipboard_method,
-            output_method,
-            autotype_backend,
-            autotype_delay_ms,
-        )
+        }
     };
 
-    // Apply post-processing if configured
-    let final_text = if let Some(config) = post_process_config {
-        if config.processor == PostProcessor::Ollama {
-            let url_for_check = config.api_key_or_url.clone();
-            let ollama_result = tauri::async_runtime::spawn_blocking(move || {
-                ollama::ensure_ollama_running(&url_for_check)
-            })
-            .await
-            .map_err(|e| format!("Task join failed: {e}"))?;
+    let Some(config) = config else {
+        return (text.to_string(), false);
+    };
 
-            if let Err(e) = ollama_result {
+    if config.processor == PostProcessor::Ollama {
+        let url_for_check = config.api_key_or_url.clone();
+        let ollama_result = tauri::async_runtime::spawn_blocking(move || {
+            ollama::ensure_ollama_running(&url_for_check)
+        })
+        .await;
+
+        match ollama_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
                 let warning = format!("Ollama: {e}");
                 warn!("Post-processing: {warning}");
                 let _ = app.emit("post-process-warning", &warning);
-
-                // Output based on configured method
-                output_text(
-                    &transcription,
-                    &output_method,
-                    &clipboard_method,
-                    &autotype_backend,
-                    autotype_delay_ms,
-                )?;
-
-                println!(
-                    "Done (unprocessed): {}",
-                    &transcription[..transcription.len().min(50)]
-                );
-                let _ = app.emit("transcription-complete", &transcription);
-                return Ok(());
+                return (text.to_string(), false);
             }
-
-            // Re-warm Ollama model (in case it unloaded during long recording > keep_alive timeout)
-            if config.ollama_model.is_some() {
-                {
-                    let settings = state.settings.lock().unwrap();
-                    settings.services.ollama.preload();
-                }
-                // Brief pause to allow warmup to complete (runs in background thread)
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            }
-        }
-
-        println!("Post-processing...");
-        let _ = app.emit("post-process-started", ());
-
-        let model = if config.processor == PostProcessor::Ollama {
-            config.ollama_model.as_deref()
-        } else {
-            None
-        };
-
-        match post_process(
-            &transcription,
-            &config.processor,
-            &config.api_key_or_url,
-            &config.prompt,
-            model,
-        )
-        .await
-        {
-            Ok(processed) => processed,
             Err(e) => {
-                let warning = e.to_string();
-                warn!("Post-processing: {warning}");
+                let warning = format!("Post-processing task failed: {e}");
+                warn!("{warning}");
                 let _ = app.emit("post-process-warning", &warning);
-                transcription
+                return (text.to_string(), false);
             }
         }
+
+        // Re-warm Ollama model (in case it unloaded during long recording > keep_alive timeout)
+        if config.ollama_model.is_some() {
+            {
+                let settings = state.settings.lock().unwrap();
+                settings.services.ollama.preload();
+            }
+            // Brief pause to allow warmup to complete (runs in background thread)
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    println!("Post-processing...");
+    let _ = app.emit("post-process-started", ());
+
+    let model = if config.processor == PostProcessor::Ollama {
+        config.ollama_model.as_deref()
     } else {
-        transcription
+        None
     };
 
-    // Output based on configured method
-    output_text(
-        &final_text,
+    match post_process(
+        text,
+        &config.processor,
+        &config.api_key_or_url,
+        &config.prompt,
+        model,
+    )
+    .await
+    {
+        Ok(processed) => (processed, true),
+        Err(e) => {
+            let warning = e.to_string();
+            warn!("Post-processing: {warning}");
+            let _ = app.emit("post-process-warning", &warning);
+            (text.to_string(), false)
+        }
+    }
+}
+
+/// Write history, emit the result, and handle output failures as warnings.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finalize_transcription(
+    app: &AppHandle,
+    state: &AppState,
+    raw_text: &str,
+    final_text: &str,
+    post_processed: bool,
+    duration_secs: f32,
+    source: HistorySource,
+    parent_id: Option<String>,
+) -> Result<(), String> {
+    // Persist before output: a clipboard failure must not lose the text.
+    record_history(
+        app,
+        state,
+        Transcript {
+            raw: raw_text,
+            final_text,
+            post_processed,
+        },
+        duration_secs,
+        source,
+        parent_id,
+    );
+
+    let (clipboard_method, output_method, autotype_backend, autotype_delay_ms) = {
+        let settings = state.settings.lock().unwrap();
+        (
+            settings.ui.clipboard_backend.clone(),
+            settings.ui.output_method.clone(),
+            settings.ui.autotype_backend.clone(),
+            settings.ui.autotype_delay_ms,
+        )
+    };
+
+    if let Err(e) = output_text(
+        final_text,
         &output_method,
         &clipboard_method,
         &autotype_backend,
         autotype_delay_ms,
-    )?;
+    ) {
+        warn!("Output failed: {e}");
+        let _ = app.emit("output-warning", e);
+    }
 
-    println!("Done: {}", &final_text[..final_text.len().min(50)]);
+    println!("Done: {}", short(final_text));
 
-    // Emit event to frontend
-    let _ = app.emit("transcription-complete", &final_text);
+    let _ = app.emit("transcription-complete", final_text);
 
     // Schedule idle model unload (if configured)
     schedule_idle_model_unload(app, state);
 
     Ok(())
+}
+
+/// Progressive transcription logic - receives result from background task
+async fn do_progressive_transcription(
+    app: &AppHandle,
+    state: &AppState,
+    duration_secs: f32,
+) -> Result<(), String> {
+    // Receive transcription result from background task
+    let rx = {
+        let mut rx_guard = state.transcription_rx.lock().unwrap();
+        rx_guard
+            .take()
+            .ok_or("No progressive transcription in progress")?
+    };
+
+    // Wait for transcription to complete (rx_guard dropped, so this is Send-safe)
+    let raw_text = rx
+        .await
+        .map_err(|_| "Transcription task dropped unexpectedly".to_string())?
+        .map_err(|e| format!("Transcription failed: {e}"))?;
+
+    let (final_text, post_processed) = post_process_text(app, state, &raw_text).await;
+
+    finalize_transcription(
+        app,
+        state,
+        &raw_text,
+        &final_text,
+        post_processed,
+        duration_secs,
+        HistorySource::Recording,
+        None,
+    )
+    .await
 }
 
 /// Schedule automatic model unload after idle timeout
@@ -258,14 +448,7 @@ fn schedule_idle_model_unload(app: &AppHandle, state: &AppState) {
     // 2. unload_minutes > 0 (0 means "never auto-unload")
     // 3. We have a local provider
     #[cfg(feature = "local-transcription")]
-    if keep_loaded
-        && unload_minutes > 0
-        && let Some(provider) = provider
-        && matches!(
-            provider,
-            TranscriptionProvider::LocalWhisper | TranscriptionProvider::LocalParakeet
-        )
-    {
+    if keep_loaded && unload_minutes > 0 && provider.as_ref().is_some_and(|p| p.is_local()) {
         let duration = Duration::from_secs(u64::from(unload_minutes) * 60);
         let app_handle = app.clone();
 
@@ -288,15 +471,9 @@ fn schedule_idle_model_unload(app: &AppHandle, state: &AppState) {
                     "Auto-unloading model after {} minutes of inactivity",
                     unload_minutes
                 );
-                match provider {
-                    TranscriptionProvider::LocalWhisper => {
-                        whisper_unload_model();
-                    }
-                    TranscriptionProvider::LocalParakeet => {
-                        unload_parakeet();
-                    }
-                    _ => {}
-                }
+                // Only one local engine is active; clearing all caches is cheap.
+                local_cpp_unload_model();
+                unload_parakeet();
             }
         });
 

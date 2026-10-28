@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use tauri::menu::MenuItem;
 use tokio::sync::oneshot;
 pub use whis_core::RecordingState;
@@ -8,6 +9,7 @@ use whis_core::{AudioRecorder, Settings, TranscriptionProvider};
 use crate::shortcuts::RdevGrabGuard;
 
 /// Cached transcription configuration (provider + API key + language)
+#[derive(Clone)]
 pub struct TranscriptionConfig {
     pub provider: TranscriptionProvider,
     pub api_key: String,
@@ -42,6 +44,8 @@ pub struct AppState {
     /// JoinHandle for pending idle model unload task (if any)
     /// Used to cancel the unload when a new recording starts
     pub idle_unload_handle: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// True while the last recording is being re-transcribed
+    pub retranscribing: AtomicBool,
     /// Guard for rdev::grab() keyboard listener (Linux only)
     #[cfg(target_os = "linux")]
     pub rdev_guard: Mutex<Option<RdevGrabGuard>>,
@@ -64,6 +68,7 @@ impl AppState {
             active_download: Mutex::new(None),
             transcription_rx: Mutex::new(None),
             idle_unload_handle: Mutex::new(None),
+            retranscribing: AtomicBool::new(false),
             #[cfg(target_os = "linux")]
             rdev_guard: Mutex::new(None),
             #[cfg(target_os = "linux")]

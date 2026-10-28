@@ -13,10 +13,9 @@
 //! - **Groq** - Fast inference
 //! - **ElevenLabs** - High quality
 //!
-//! # Local Providers (no API key, require model download)
+//! # Local Provider (no API key, requires model download)
 //!
-//! - **LocalWhisper** - Run Whisper locally via ONNX
-//! - **LocalParakeet** - NVIDIA's Parakeet model locally
+//! - **Local** - Any model from the local catalog (Whisper, Parakeet, GGUF)
 //!
 //! # Helper Methods
 //!
@@ -42,10 +41,12 @@ pub enum TranscriptionProvider {
     #[serde(rename = "deepgram-realtime")]
     DeepgramRealtime,
     ElevenLabs,
-    #[serde(rename = "local-whisper")]
-    LocalWhisper,
-    #[serde(rename = "local-parakeet")]
-    LocalParakeet,
+    /// Local transcription with a model from the catalog.
+    ///
+    /// Legacy names (`local-whisper`, `local-parakeet`) deserialize to this
+    /// variant so old settings keep working.
+    #[serde(alias = "local-whisper", alias = "local-parakeet")]
+    Local,
 }
 
 impl Default for TranscriptionProvider {
@@ -65,12 +66,11 @@ impl TranscriptionProvider {
             TranscriptionProvider::Deepgram => "deepgram",
             TranscriptionProvider::DeepgramRealtime => "deepgram-realtime",
             TranscriptionProvider::ElevenLabs => "elevenlabs",
-            TranscriptionProvider::LocalWhisper => "local-whisper",
-            TranscriptionProvider::LocalParakeet => "local-parakeet",
+            TranscriptionProvider::Local => "local",
         }
     }
 
-    /// Get the environment variable name for this provider's API key (or path/URL for local)
+    /// Get the environment variable name for this provider's API key (or path for local)
     pub fn api_key_env_var(&self) -> &'static str {
         match self {
             TranscriptionProvider::OpenAI | TranscriptionProvider::OpenAIRealtime => {
@@ -82,8 +82,7 @@ impl TranscriptionProvider {
                 "DEEPGRAM_API_KEY"
             }
             TranscriptionProvider::ElevenLabs => "ELEVENLABS_API_KEY",
-            TranscriptionProvider::LocalWhisper => "LOCAL_WHISPER_MODEL_PATH",
-            TranscriptionProvider::LocalParakeet => "LOCAL_PARAKEET_MODEL_PATH",
+            TranscriptionProvider::Local => "LOCAL_MODEL_PATH",
         }
     }
 
@@ -100,8 +99,7 @@ impl TranscriptionProvider {
             TranscriptionProvider::Mistral,
             TranscriptionProvider::Groq,
             TranscriptionProvider::ElevenLabs,
-            TranscriptionProvider::LocalWhisper,
-            TranscriptionProvider::LocalParakeet,
+            TranscriptionProvider::Local,
         ]
     }
 
@@ -125,25 +123,18 @@ impl TranscriptionProvider {
             TranscriptionProvider::Deepgram => "Deepgram",
             TranscriptionProvider::DeepgramRealtime => "Deepgram Realtime",
             TranscriptionProvider::ElevenLabs => "ElevenLabs",
-            TranscriptionProvider::LocalWhisper => "Local Whisper",
-            TranscriptionProvider::LocalParakeet => "Local Parakeet",
+            TranscriptionProvider::Local => "Local",
         }
     }
 
-    /// Whether this provider requires an API key (vs path/URL for local/remote)
+    /// Whether this provider requires an API key (vs a model path for local)
     pub fn requires_api_key(&self) -> bool {
-        !matches!(
-            self,
-            TranscriptionProvider::LocalWhisper | TranscriptionProvider::LocalParakeet
-        )
+        !self.is_local()
     }
 
     /// Whether this is a local provider (no cloud API)
     pub fn is_local(&self) -> bool {
-        matches!(
-            self,
-            TranscriptionProvider::LocalWhisper | TranscriptionProvider::LocalParakeet
-        )
+        matches!(self, TranscriptionProvider::Local)
     }
 
     /// Get the API key name for this provider.
@@ -159,19 +150,19 @@ impl TranscriptionProvider {
         }
     }
 
-    /// Configure model memory behavior for local providers.
+    /// Configure model memory behavior for local models.
     ///
-    /// When `keep` is true, the model stays loaded in memory between
-    /// transcriptions for faster subsequent runs. When false, the model
-    /// is unloaded after each transcription to free memory.
+    /// When `keep` is true, models stay loaded in memory between
+    /// transcriptions for faster subsequent runs. When false, they are
+    /// unloaded after each transcription to free memory.
     ///
     /// No-op for cloud providers (they don't have local model memory).
     #[cfg(feature = "local-transcription")]
     pub fn set_keep_loaded(&self, keep: bool) {
-        match self {
-            Self::LocalWhisper => crate::provider::whisper_set_keep_loaded(keep),
-            Self::LocalParakeet => crate::provider::parakeet_set_keep_loaded(keep),
-            _ => {} // Cloud providers don't have model memory
+        if self.is_local() {
+            // Only one engine is used at a time, so configure all caches.
+            crate::provider::local_cpp_set_keep_loaded(keep);
+            crate::provider::parakeet_set_keep_loaded(keep);
         }
     }
 }
@@ -196,12 +187,10 @@ impl std::str::FromStr for TranscriptionProvider {
             "deepgram" => Ok(TranscriptionProvider::Deepgram),
             "deepgram-realtime" | "deepgramrealtime" => Ok(TranscriptionProvider::DeepgramRealtime),
             "elevenlabs" => Ok(TranscriptionProvider::ElevenLabs),
-            "local-whisper" | "localwhisper" | "whisper" => Ok(TranscriptionProvider::LocalWhisper),
-            "local-parakeet" | "localparakeet" | "parakeet" => {
-                Ok(TranscriptionProvider::LocalParakeet)
-            }
+            "local" | "local-whisper" | "localwhisper" | "whisper" | "local-parakeet"
+            | "localparakeet" | "parakeet" => Ok(TranscriptionProvider::Local),
             _ => Err(format!(
-                "Unknown provider: {}. Available: openai, openai-realtime, mistral, groq, deepgram, deepgram-realtime, elevenlabs, local-whisper, local-parakeet",
+                "Unknown provider: {}. Available: openai, openai-realtime, mistral, groq, deepgram, deepgram-realtime, elevenlabs, local",
                 s
             )),
         }

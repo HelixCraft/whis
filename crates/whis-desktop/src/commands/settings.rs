@@ -4,11 +4,8 @@
 
 use super::save_settings_to_store;
 use crate::state::AppState;
-use tauri::{AppHandle, State};
-use whis_core::{
-    Settings,
-    model::{ModelType, ParakeetModel},
-};
+use tauri::{AppHandle, Emitter, State};
+use whis_core::Settings;
 
 /// Save settings response
 #[derive(serde::Serialize)]
@@ -47,10 +44,10 @@ pub async fn save_settings(
             current.transcription.provider != settings.transcription.provider
                 || current.transcription.api_keys != settings.transcription.api_keys
                 || current.transcription.language != settings.transcription.language
-                || current.transcription.local_models.whisper_path
-                    != settings.transcription.local_models.whisper_path
-                || current.transcription.local_models.parakeet_path
-                    != settings.transcription.local_models.parakeet_path,
+                || current.transcription.local_models.selected
+                    != settings.transcription.local_models.selected
+                || current.transcription.local_models.custom_path
+                    != settings.transcription.local_models.custom_path,
             current.shortcuts.desktop_key != settings.shortcuts.desktop_key,
         )
     };
@@ -62,6 +59,19 @@ pub async fn save_settings(
 
     // Save to Tauri store
     save_settings_to_store(&app, &settings)?;
+
+    // Disabling the last-recording storage drops the stored file right away, so
+    // the setting is not silently ignored until the next recording.
+    if !settings.ui.last_audio.enabled {
+        match whis_core::audio::last_recording::delete() {
+            Ok(()) => {
+                let _ = app.emit("last-audio-updated", ());
+            }
+            Err(e) => {
+                whis_core::warn!("Failed to delete the stored recording: {e}");
+            }
+        }
+    }
 
     // Clear cached transcription config if provider or API key changed
     if config_changed {
@@ -86,25 +96,34 @@ pub async fn check_config_readiness(
     provider: String,
     post_processor: String,
     api_keys: std::collections::HashMap<String, String>,
-    whisper_model_path: Option<String>,
-    parakeet_model_path: Option<String>,
+    local_model: Option<String>,
+    local_model_path: Option<String>,
     ollama_url: Option<String>,
 ) -> ConfigReadiness {
     // Check transcription readiness
     let (transcription_ready, transcription_error) = match provider.as_str() {
-        "local-whisper" => match &whisper_model_path {
-            Some(path) if std::path::Path::new(path).exists() => (true, None),
-            Some(_) => (false, Some("Whisper model file not found".to_string())),
-            None => (false, Some("Whisper model path not configured".to_string())),
-        },
-        "local-parakeet" => match &parakeet_model_path {
-            Some(path) if ParakeetModel.verify(std::path::Path::new(path)) => (true, None),
-            Some(_) => (
-                false,
-                Some("Parakeet model not found or invalid".to_string()),
-            ),
-            None => (false, Some("Parakeet model not configured".to_string())),
-        },
+        "local" | "local-whisper" | "local-parakeet" => {
+            let model = local_model.as_deref().and_then(whis_core::model::find);
+            // A custom path wins over the catalog selection, mirroring the
+            // resolution in whis-core settings.
+            let custom_path = local_model_path
+                .as_deref()
+                .filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from);
+
+            let error = match (&custom_path, model) {
+                // A custom path can be any format, so only its existence is
+                // checkable here; the engine reports format errors on use.
+                (Some(path), _) => {
+                    (!path.exists()).then(|| "Local model not found or incomplete".to_string())
+                }
+                (None, Some(model)) if model.verify(&model.path()) => None,
+                (None, Some(_)) => Some("Local model not found or incomplete".to_string()),
+                (None, None) => Some("No local model configured".to_string()),
+            };
+
+            (error.is_none(), error)
+        }
         provider => {
             // Normalize provider for API key lookup (realtime variants share keys)
             let key_provider = match provider {

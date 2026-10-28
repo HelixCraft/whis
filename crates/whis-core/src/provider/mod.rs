@@ -86,9 +86,9 @@ mod elevenlabs;
 pub mod error;
 mod groq;
 #[cfg(feature = "local-transcription")]
-mod local_parakeet;
+mod local_cpp;
 #[cfg(feature = "local-transcription")]
-pub mod local_whisper;
+mod local_parakeet;
 mod mistral;
 mod openai;
 #[cfg(feature = "realtime")]
@@ -106,28 +106,45 @@ pub use elevenlabs::ElevenLabsProvider;
 pub use error::ProviderError;
 pub use groq::GroqProvider;
 #[cfg(feature = "local-transcription")]
-pub use local_parakeet::LocalParakeetProvider;
+pub use local_cpp::{
+    preload_model as local_cpp_preload_model, set_keep_loaded as local_cpp_set_keep_loaded,
+    unload_model as local_cpp_unload_model,
+};
 #[cfg(feature = "local-transcription")]
 pub use local_parakeet::preload_parakeet;
 #[cfg(feature = "local-transcription")]
-pub use local_parakeet::transcribe_raw as transcribe_raw_parakeet;
-#[cfg(feature = "local-transcription")]
 pub use local_parakeet::{set_keep_loaded as parakeet_set_keep_loaded, unload_parakeet};
-#[cfg(feature = "local-transcription")]
-pub use local_whisper::LocalWhisperProvider;
-#[cfg(feature = "local-transcription")]
-pub use local_whisper::transcribe_raw;
-#[cfg(feature = "local-transcription")]
-pub use local_whisper::{
-    preload_model as whisper_preload_model, set_keep_loaded as whisper_set_keep_loaded,
-    unload_model as whisper_unload_model,
-};
 pub use mistral::MistralProvider;
 pub use openai::OpenAIProvider;
 #[cfg(feature = "realtime")]
 pub use openai_realtime::OpenAIRealtimeProvider;
 #[cfg(feature = "realtime")]
 pub use realtime::RealtimeTranscriptionBackend;
+
+/// Transcribe 16 kHz mono samples with a local model.
+///
+/// The engine is inferred from the model path, so callers only need to pass
+/// the path from the settings.
+#[cfg(feature = "local-transcription")]
+pub fn transcribe_local(
+    model_path: &str,
+    samples: Vec<f32>,
+    language: Option<&str>,
+) -> anyhow::Result<TranscriptionResult> {
+    use crate::model::{ModelEngine, catalog::engine_for_path};
+
+    match engine_for_path(model_path) {
+        // Whisper (.bin) and GGUF models share the transcribe.cpp engine.
+        Some(ModelEngine::WhisperCpp | ModelEngine::Gguf) => {
+            local_cpp::transcribe_raw(model_path, &samples, language)
+        }
+        Some(ModelEngine::Onnx) => local_parakeet::transcribe_raw(model_path, samples),
+        _ => anyhow::bail!(
+            "Unsupported local model '{}'. Expected a .bin, .gguf, or ONNX model directory.",
+            model_path
+        ),
+    }
+}
 
 use crate::config::TranscriptionProvider;
 
@@ -222,10 +239,6 @@ impl ProviderRegistry {
         #[cfg(feature = "realtime")]
         providers.insert("deepgram-realtime", Arc::new(DeepgramRealtimeProvider));
         providers.insert("elevenlabs", Arc::new(ElevenLabsProvider));
-        #[cfg(feature = "local-transcription")]
-        providers.insert("local-whisper", Arc::new(LocalWhisperProvider));
-        #[cfg(feature = "local-transcription")]
-        providers.insert("local-parakeet", Arc::new(LocalParakeetProvider));
 
         Self { providers }
     }

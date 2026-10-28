@@ -54,7 +54,7 @@ fn setup_wizard() -> Result<()> {
 
     // Default to current provider type (Local if using local, else Cloud)
     let default = match settings.transcription.provider {
-        TranscriptionProvider::LocalParakeet | TranscriptionProvider::LocalWhisper => 1,
+        TranscriptionProvider::Local => 1,
         _ => 0,
     };
 

@@ -4,12 +4,12 @@
 
 use super::config::load_transcription_config;
 use crate::state::{AppState, RecordingState};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
 #[cfg(feature = "local-transcription")]
 use whis_core::progressive_transcribe_local;
 use whis_core::{
-    AudioRecorder, ChunkerConfig, PostProcessor, ProgressiveChunker, TranscriptionProvider, info,
+    AudioRecorder, ChunkerConfig, PostProcessor, ProgressiveChunker, info,
     progressive_transcribe_cloud,
 };
 
@@ -22,7 +22,7 @@ use whis_core::{
 ///
 /// The transcription result will be available via the oneshot channel
 /// stored in AppState when recording completes.
-pub fn start_recording_sync(_app: &AppHandle, state: &AppState) -> Result<(), String> {
+pub fn start_recording_sync(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // Cancel any pending idle model unload (user is recording again)
     state.cancel_idle_unload();
 
@@ -52,9 +52,7 @@ pub fn start_recording_sync(_app: &AppHandle, state: &AppState) -> Result<(), St
     #[cfg(feature = "local-transcription")]
     let keep_loaded = settings.ui.model_memory.keep_model_loaded;
     #[cfg(feature = "local-transcription")]
-    let whisper_model_path = settings.transcription.whisper_model_path();
-    #[cfg(feature = "local-transcription")]
-    let parakeet_model_path = settings.transcription.parakeet_model_path();
+    let local_model_path = settings.transcription.local_model_path();
     let ollama_preload = settings.post_processing.processor == PostProcessor::Ollama;
     let ollama_settings = settings.services.ollama.clone();
     drop(settings);
@@ -87,18 +85,16 @@ pub fn start_recording_sync(_app: &AppHandle, state: &AppState) -> Result<(), St
 
     // Preload models in background to reduce latency
     #[cfg(feature = "local-transcription")]
-    match provider {
-        TranscriptionProvider::LocalWhisper => {
-            if let Some(ref model_path) = whisper_model_path {
-                whis_core::whisper_preload_model(model_path);
-            }
+    if provider.is_local()
+        && let Some(ref model_path) = local_model_path
+    {
+        match whis_core::model::catalog::engine_for_path(model_path) {
+            Some(
+                whis_core::model::ModelEngine::WhisperCpp | whis_core::model::ModelEngine::Gguf,
+            ) => whis_core::local_cpp_preload_model(model_path),
+            Some(whis_core::model::ModelEngine::Onnx) => whis_core::preload_parakeet(model_path),
+            _ => {}
         }
-        TranscriptionProvider::LocalParakeet => {
-            if let Some(ref model_path) = parakeet_model_path {
-                whis_core::preload_parakeet(model_path);
-            }
-        }
-        _ => {} // Cloud providers don't need preload
     }
 
     // Preload Ollama if post-processing enabled
@@ -154,17 +150,29 @@ pub fn start_recording_sync(_app: &AppHandle, state: &AppState) -> Result<(), St
         });
 
         // Spawn transcription task
+        let preview_handle = app.clone();
         tauri::async_runtime::spawn(async move {
+            // Live preview: each finished chunk emits the merged text so far, so
+            // the main window can show progress before recording stops.
+            let partial_callback: Option<whis_core::transcription::PartialTextCallback> =
+                Some(Box::new(move |text: &str| {
+                    let _ = preview_handle.emit("partial-transcription", text);
+                }));
+
             let result: Result<String, String> = {
                 #[cfg(feature = "local-transcription")]
-                if provider == TranscriptionProvider::LocalParakeet {
-                    match parakeet_model_path {
-                        Some(model_path) => {
-                            progressive_transcribe_local(&model_path, chunk_rx, None)
-                                .await
-                                .map_err(|e| e.to_string())
-                        }
-                        None => Err("Parakeet model path not configured".to_string()),
+                if provider.is_local() {
+                    match local_model_path {
+                        Some(model_path) => progressive_transcribe_local(
+                            &model_path,
+                            language.as_deref(),
+                            chunk_rx,
+                            None,
+                            partial_callback,
+                        )
+                        .await
+                        .map_err(|e| e.to_string()),
+                        None => Err("Local model not configured. Add one in Settings.".to_string()),
                     }
                 } else {
                     progressive_transcribe_cloud(
@@ -173,6 +181,7 @@ pub fn start_recording_sync(_app: &AppHandle, state: &AppState) -> Result<(), St
                         language.as_deref(),
                         chunk_rx,
                         None,
+                        partial_callback,
                     )
                     .await
                     .map_err(|e| e.to_string())
@@ -185,6 +194,7 @@ pub fn start_recording_sync(_app: &AppHandle, state: &AppState) -> Result<(), St
                     language.as_deref(),
                     chunk_rx,
                     None,
+                    partial_callback,
                 )
                 .await
                 .map_err(|e| e.to_string())
