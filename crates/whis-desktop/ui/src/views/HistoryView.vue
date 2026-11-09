@@ -4,6 +4,7 @@ import type { HistoryEntry } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { onMounted, onUnmounted, ref } from 'vue'
+import LastAudioCard from '../components/LastAudioCard.vue'
 import { historyStore } from '../stores/history'
 
 // Unwrap the store refs once: nested refs are not auto-unwrapped in templates.
@@ -109,6 +110,9 @@ onUnmounted(() => {
     </header>
 
     <div class="section-content">
+      <!-- Most recent recording: kept so it can be replayed or re-transcribed -->
+      <LastAudioCard class="last-audio" />
+
       <div class="history-toolbar">
         <span class="entry-count">
           {{ entries.length }} {{ entries.length === 1 ? 'entry' : 'entries' }}
@@ -210,6 +214,11 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 8px;
+}
+
+/* Spacing for the last-recording card above the history list */
+.last-audio {
+  margin-bottom: 16px;
 }
 
 .entry-count {

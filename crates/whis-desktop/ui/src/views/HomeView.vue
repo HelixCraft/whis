@@ -4,7 +4,6 @@ import type { LocalModelInfo, StatusResponse } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import LastAudioCard from '../components/LastAudioCard.vue'
 import { settingsStore } from '../stores/settings'
 
 const status = ref<StatusResponse>({ state: 'Idle', config_valid: false })
@@ -366,9 +365,6 @@ onUnmounted(() => {
         </p>
       </div>
 
-      <!-- Last recording card (play / re-transcribe / delete) -->
-      <LastAudioCard class="last-audio" />
-
       <!-- Transcription failure with retry from the stored recording -->
       <div v-if="transcriptionError" class="error-msg transcription-error">
         <p><strong>Transcription failed:</strong> {{ transcriptionError }}</p>
@@ -601,12 +597,6 @@ onUnmounted(() => {
   opacity: 0.5;
   cursor: default;
 }
-
-/* Last recording card spacing inside the action column */
-.last-audio {
-  margin-top: 4px;
-}
-
 
 /* Warning message (for post-processing warnings) */
 .warning-msg {
