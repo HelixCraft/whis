@@ -62,6 +62,7 @@ pub(crate) fn save_settings_to_store(app: &AppHandle, settings: &Settings) -> Re
         .map_err(|e| format!("Failed to save settings: {e}"))
 }
 
+pub mod audio;
 pub mod bubble;
 pub mod history;
 pub mod last_audio;
@@ -82,6 +83,9 @@ pub use system::*;
 // History and last recording commands
 pub use history::*;
 pub use last_audio::*;
+
+// Audio test commands
+pub use audio::*;
 
 // Validation commands
 pub use validation::*;

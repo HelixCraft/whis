@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import AudioQualityNotice from './components/audio/AudioQualityNotice.vue'
 import { settingsStore } from './stores/settings'
 
 const route = useRoute()
@@ -142,6 +143,7 @@ onMounted(async () => {
         </div>
 
         <!-- Router view with props for static data -->
+        <AudioQualityNotice />
         <router-view
           :app-version="appVersion"
           :app-site="appSite"

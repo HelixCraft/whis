@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import type { UnlistenFn } from '@tauri-apps/api/event'
-import type { LastAudioInfo } from '../types'
+import type { AudioQuality, LastAudioInfo } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { onMounted, onUnmounted, ref } from 'vue'
 
 const info = ref<LastAudioInfo | null>(null)
+const quality = ref<AudioQuality | null>(null)
 const busy = ref(false)
 const message = ref<string | null>(null)
 const error = ref<string | null>(null)
@@ -27,8 +28,15 @@ function formatDuration(seconds: number): string {
 
 async function refresh() {
   info.value = await invoke<LastAudioInfo | null>('get_last_audio_info')
+  quality.value = await invoke<AudioQuality | null>('get_last_audio_quality')
   if (!info.value)
     confirmingDelete.value = false
+}
+
+function formatSnr(snr: number): string {
+  if (!Number.isFinite(snr))
+    return 'n/a'
+  return `${snr.toFixed(1)} dB`
 }
 
 async function retranscribe() {
@@ -75,6 +83,9 @@ async function remove() {
 onMounted(async () => {
   await refresh()
   unlisten.push(await listen('last-audio-updated', () => refresh()))
+  unlisten.push(await listen<AudioQuality>('audio-quality-updated', (event) => {
+    quality.value = event.payload
+  }))
   unlisten.push(await listen('retranscription-started', () => {
     busy.value = true
     message.value = null
@@ -102,6 +113,27 @@ onUnmounted(() => {
       <span class="card-meta">
         {{ formatDate(info.created_at_ms) }} · {{ formatDuration(info.duration_secs) }}
         <template v-if="info.model"> · {{ info.model }}</template>
+      </span>
+    </div>
+
+    <div v-if="quality && quality.chunks > 0" class="quality-row">
+      <span class="quality-item">
+        SNR <strong>{{ formatSnr(quality.snr_db) }}</strong>
+      </span>
+      <span v-if="quality.hum_hz" class="quality-item">
+        Hum <strong>{{ Math.round(quality.hum_hz) }} Hz</strong>
+      </span>
+      <span v-if="quality.gain_db > 0.1" class="quality-item">
+        Gain <strong>+{{ quality.gain_db.toFixed(1) }} dB</strong>
+      </span>
+      <span v-if="quality.denoised" class="quality-item">
+        Denoised
+      </span>
+      <span v-if="quality.clipping" class="quality-item warning">
+        Clipping
+      </span>
+      <span v-if="quality.gated_chunks > 0" class="quality-item warning">
+        {{ quality.gated_chunks }} silent chunk(s) skipped
       </span>
     </div>
 
@@ -167,6 +199,26 @@ onUnmounted(() => {
 .btn-small {
   padding: 6px 10px;
   font-size: 11px;
+}
+
+.quality-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.quality-item {
+  font-size: 10px;
+  color: var(--text-weak);
+}
+
+.quality-item strong {
+  color: var(--text-strong);
+  font-weight: 500;
+}
+
+.quality-item.warning {
+  color: var(--recording);
 }
 
 .btn.danger {

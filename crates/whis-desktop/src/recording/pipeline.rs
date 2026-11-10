@@ -390,6 +390,43 @@ pub(crate) async fn finalize_transcription(
     Ok(())
 }
 
+/// Store the quality of a finished recording and notify the UI.
+pub(crate) fn publish_audio_quality(
+    app: &AppHandle,
+    state: &AppState,
+    quality: whis_core::audio::AudioQuality,
+) {
+    if quality.chunks == 0 {
+        return;
+    }
+
+    *state.last_audio_quality.lock().unwrap() = Some(quality.clone());
+    let _ = app.emit("audio-quality-updated", &quality);
+
+    let mode = state.with_settings(|s| s.ui.audio_enhance.mode);
+    if quality.is_noisy()
+        && matches!(
+            mode,
+            whis_core::audio::EnhanceMode::Off | whis_core::audio::EnhanceMode::Light
+        )
+    {
+        let _ = app.emit("audio-quality-warning", &quality);
+    }
+}
+
+/// Publish the measured quality of the finished recording.
+///
+/// When the recording looks noisy and denoising is off, the UI also gets a
+/// one-time recommendation. The raw audio is never changed by this.
+fn report_audio_quality(app: &AppHandle, state: &AppState) {
+    let quality = state.active_quality.lock().unwrap().take();
+    let Some(quality) = quality else {
+        return;
+    };
+    let quality = quality.lock().unwrap().clone();
+    publish_audio_quality(app, state, quality);
+}
+
 /// Progressive transcription logic - receives result from background task
 async fn do_progressive_transcription(
     app: &AppHandle,
@@ -405,10 +442,15 @@ async fn do_progressive_transcription(
     };
 
     // Wait for transcription to complete (rx_guard dropped, so this is Send-safe)
-    let raw_text = rx
+    let transcription = rx
         .await
-        .map_err(|_| "Transcription task dropped unexpectedly".to_string())?
-        .map_err(|e| format!("Transcription failed: {e}"))?;
+        .map_err(|_| "Transcription task dropped unexpectedly".to_string())?;
+
+    // Report quality even when transcription failed: the audio was measured
+    // and the user can still act on a noisy-recording recommendation.
+    report_audio_quality(app, state);
+
+    let raw_text = transcription.map_err(|e| format!("Transcription failed: {e}"))?;
 
     let (final_text, post_processed) = post_process_text(app, state, &raw_text).await;
 

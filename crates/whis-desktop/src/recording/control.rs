@@ -25,6 +25,7 @@ use whis_core::{
 pub fn start_recording_sync(app: &AppHandle, state: &AppState) -> Result<(), String> {
     // Cancel any pending idle model unload (user is recording again)
     state.cancel_idle_unload();
+    *state.active_quality.lock().unwrap() = None;
 
     // Load transcription config if not already loaded
     let (provider, api_key, language) = {
@@ -49,6 +50,7 @@ pub fn start_recording_sync(app: &AppHandle, state: &AppState) -> Result<(), Str
     let vad_threshold = settings.ui.vad.threshold;
     let device_name = settings.ui.microphone_device.clone();
     let chunk_duration = settings.ui.chunk_duration_secs;
+    let enhance_mode = settings.ui.audio_enhance.mode;
     #[cfg(feature = "local-transcription")]
     let keep_loaded = settings.ui.model_memory.keep_model_loaded;
     #[cfg(feature = "local-transcription")]
@@ -113,6 +115,13 @@ pub fn start_recording_sync(app: &AppHandle, state: &AppState) -> Result<(), Str
             let realtime_backend =
                 whis_core::get_realtime_backend(&provider).map_err(|e| e.to_string())?;
 
+            // Realtime audio is processed block by block. No denoising is
+            // applied here, only the stateful high-pass and a slow level gain.
+            let audio_rx_unbounded = whis_core::audio::enhance_audio_stream(
+                audio_rx_unbounded,
+                whis_core::audio::EnhanceConfig { mode: enhance_mode },
+            );
+
             tauri::async_runtime::spawn(async move {
                 let result = realtime_backend
                     .transcribe_stream(&api_key, audio_rx_unbounded, language)
@@ -148,6 +157,14 @@ pub fn start_recording_sync(app: &AppHandle, state: &AppState) -> Result<(), Str
         tauri::async_runtime::spawn(async move {
             let _ = chunker.consume_stream(audio_rx_unbounded, None).await;
         });
+
+        // Clean up and measure each chunk before it reaches the provider. The
+        // stored raw recording is written elsewhere and stays untouched.
+        let (chunk_rx, quality) = whis_core::audio::enhance_chunk_stream(
+            chunk_rx,
+            whis_core::audio::EnhanceConfig { mode: enhance_mode },
+        );
+        *state.active_quality.lock().unwrap() = Some(quality);
 
         // Spawn transcription task
         let preview_handle = app.clone();

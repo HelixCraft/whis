@@ -1,8 +1,10 @@
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use tauri::menu::MenuItem;
 use tokio::sync::oneshot;
 pub use whis_core::RecordingState;
+use whis_core::audio::AudioQuality;
 use whis_core::{AudioRecorder, Settings, TranscriptionProvider};
 
 #[cfg(target_os = "linux")]
@@ -41,6 +43,12 @@ pub struct AppState {
     pub active_download: Mutex<Option<DownloadState>>,
     /// Progressive transcription result receiver (if progressive mode active)
     pub transcription_rx: Mutex<Option<oneshot::Receiver<Result<String, String>>>>,
+    /// Quality metrics of the most recent completed transcription.
+    pub last_audio_quality: Mutex<Option<AudioQuality>>,
+    /// Shared quality accumulator for the recording being processed right now.
+    pub active_quality: Mutex<Option<Arc<Mutex<AudioQuality>>>>,
+    /// True while the settings page runs a test recording.
+    pub testing_audio: AtomicBool,
     /// JoinHandle for pending idle model unload task (if any)
     /// Used to cancel the unload when a new recording starts
     pub idle_unload_handle: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
@@ -67,6 +75,9 @@ impl AppState {
             tray_available: Mutex::new(tray_available),
             active_download: Mutex::new(None),
             transcription_rx: Mutex::new(None),
+            last_audio_quality: Mutex::new(None),
+            active_quality: Mutex::new(None),
+            testing_audio: AtomicBool::new(false),
             idle_unload_handle: Mutex::new(None),
             retranscribing: AtomicBool::new(false),
             #[cfg(target_os = "linux")]

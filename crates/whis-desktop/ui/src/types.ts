@@ -57,6 +57,9 @@ export interface Settings {
   ui: {
     clipboard_backend: string
     microphone_device: string | null
+    audio_enhance: {
+      mode: EnhanceMode
+    }
     chunk_duration_secs: number
     output_method: OutputMethod
     autotype_backend: AutotypeBackend
@@ -85,6 +88,9 @@ export interface Settings {
 
 // How transcribed text should be output
 export type OutputMethod = 'clipboard' | 'autotype' | 'both'
+
+// Cleanup applied to the audio before transcription
+export type EnhanceMode = 'off' | 'light' | 'auto' | 'strong'
 
 // Which backend to use for autotyping (when OutputMethod includes autotype)
 export type AutotypeBackend = 'auto' | 'tools' | 'enigo'
@@ -166,6 +172,31 @@ export interface LastAudioInfo {
   provider: string | null
   model: string | null
   language: string | null
+}
+
+// Measured audio quality of a recording
+export interface AudioQuality {
+  peak_dbfs: number
+  rms_dbfs: number
+  speech_dbfs: number
+  noise_dbfs: number
+  snr_db: number
+  gain_db: number
+  hum_hz: number | null
+  clipping: boolean
+  denoised: boolean
+  chunks: number
+  gated_chunks: number
+  duration_secs: number
+}
+
+// Result of a settings test recording
+export interface AudioTestResult {
+  raw_path: string
+  clean_path: string
+  duration_secs: number
+  quality: AudioQuality
+  mode: EnhanceMode
 }
 
 // Preset info from backend

@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import type { TranscriptionMode } from '../components/settings/ModeCards.vue'
-import type { OutputMethod, PostProcessor, Provider, SelectOption } from '../types'
+import type { EnhanceMode, OutputMethod, PostProcessor, Provider, SelectOption } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { computed, onMounted, ref } from 'vue'
 import AppSelect from '../components/AppSelect.vue'
 import AppSlider from '../components/AppSlider.vue'
+import AudioTestCard from '../components/audio/AudioTestCard.vue'
 import CloudProviderConfig from '../components/settings/CloudProviderConfig.vue'
 import LocalModelsConfig from '../components/settings/LocalModelsConfig.vue'
 import ModeCards from '../components/settings/ModeCards.vue'
@@ -194,6 +195,22 @@ const microphoneOptions = computed<SelectOption[]>(() => {
 
 function handleMicrophoneChange(value: string | null) {
   settingsStore.setMicrophoneDevice(value)
+}
+
+// Audio cleanup before transcription
+const enhanceMode = computed(() => settingsStore.state.ui.audio_enhance.mode)
+
+const enhanceModeOptions: SelectOption[] = [
+  { value: 'off', label: 'Off' },
+  { value: 'light', label: 'Light (recommended)' },
+  { value: 'auto', label: 'Auto denoise' },
+  { value: 'strong', label: 'Strong denoise' },
+]
+
+function handleEnhanceModeChange(value: string | null) {
+  if (value) {
+    settingsStore.setEnhanceMode(value as EnhanceMode)
+  }
 }
 
 // Chunk duration for progressive transcription
@@ -415,6 +432,30 @@ function handleOllamaKeepAliveChange(value: string | null) {
               @update:model-value="handleMicrophoneChange"
             />
           </div>
+        </div>
+
+        <!-- Audio Cleanup Section -->
+        <div class="settings-section">
+          <p class="section-label">
+            audio cleanup
+          </p>
+
+          <div class="field-row">
+            <label>Cleanup</label>
+            <AppSelect
+              :model-value="enhanceMode"
+              :options="enhanceModeOptions"
+              @update:model-value="handleEnhanceModeChange"
+            />
+          </div>
+
+          <p class="env-hint">
+            <span class="hint-marker">[i]</span>
+            Light removes rumble and mains hum and lifts quiet speech without changing loud audio.
+            Denoise also has to remove noise, which can leave artifacts, so it is opt-in.
+          </p>
+
+          <AudioTestCard />
         </div>
 
         <!-- Post-Processing Section -->
@@ -694,6 +735,14 @@ function handleOllamaKeepAliveChange(value: string | null) {
           <div class="help-section">
             <h3>microphone</h3>
             <p>Select which audio input device to use. "System Default" uses your system's current default microphone.</p>
+          </div>
+
+          <div class="help-section">
+            <h3>audio cleanup</h3>
+            <p>Processing applied before the audio is sent to the model. The stored recording stays untouched.</p>
+            <p><strong>Light</strong> applies a high-pass filter at 60 Hz, removes detected 50/60 Hz mains hum, and amplifies quiet speech up to -20 dBFS without ever clipping. Loud audio is not attenuated, so a good microphone is not made worse.</p>
+            <p><strong>Auto denoise</strong> additionally removes steady background noise, but only when the measured signal-to-noise ratio is between 3 and 15 dB and the recording contains speech pauses. <strong>Strong denoise</strong> always denoises; use it only for consistently noisy setups.</p>
+            <p>The test button records 6 seconds and lets you compare the original with the cleaned audio at the same level.</p>
           </div>
 
           <div class="help-section">

@@ -26,6 +26,7 @@ pub use pipeline::stop_and_transcribe;
 
 use crate::state::{AppState, RecordingState};
 use crate::{bubble, tray};
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Manager};
 use whis_core::error;
 
@@ -33,6 +34,13 @@ use whis_core::error;
 /// Called from global shortcuts, tray menu, and IPC
 pub fn toggle_recording(app: AppHandle) {
     let state = app.state::<AppState>();
+
+    // A test recording started from Settings owns the microphone. Ignore
+    // toggles from shortcuts, tray, and IPC while it is running.
+    if state.testing_audio.load(Ordering::SeqCst) {
+        return;
+    }
+
     let current_state = *state.state.lock().unwrap();
 
     match current_state {

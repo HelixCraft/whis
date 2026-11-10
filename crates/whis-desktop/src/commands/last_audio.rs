@@ -3,10 +3,13 @@
 //! The recording is written before transcription starts, so these commands
 //! let the user inspect, play, delete, or re-transcribe it later.
 
-use crate::recording::pipeline::{finalize_transcription, post_process_text};
+use crate::recording::pipeline::{
+    finalize_transcription, post_process_text, publish_audio_quality,
+};
 use crate::state::{AppState, RecordingState};
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, State};
+use whis_core::audio::enhance::EnhanceConfig;
 use whis_core::audio::last_recording::{self, LastAudioInfo};
 use whis_core::history::HistorySource;
 
@@ -105,14 +108,22 @@ async fn run_retranscription(app: &AppHandle, state: &AppState) -> Result<String
     state.set_state(RecordingState::Transcribing);
     let _ = app.emit("retranscription-started", ());
 
-    let raw_text = whis_core::transcribe_samples(
+    // Re-apply the cleanup chain with the current mode. The stored file stays
+    // raw, so a later re-transcription can use a different mode.
+    let enhance_config = EnhanceConfig {
+        mode: state.with_settings(|s| s.ui.audio_enhance.mode),
+    };
+    let (raw_text, quality) = whis_core::transcribe_samples_enhanced(
         &config.provider,
         &config.api_key,
         config.language.as_deref(),
         samples,
+        &enhance_config,
     )
     .await
     .map_err(|e| format!("Re-transcription failed: {e}"))?;
+
+    publish_audio_quality(app, state, quality);
 
     if raw_text.trim().is_empty() {
         return Err("Re-transcription returned no text".to_string());
