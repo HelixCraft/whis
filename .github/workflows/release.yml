@@ -56,12 +56,6 @@ jobs:
       - name: Install dependencies
         run: just deps-cli
 
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@v1
-        with:
-          vulkan_version: latest
-          cache: true
-
       - name: Build
         run: just build-release-cli
 
@@ -93,12 +87,6 @@ jobs:
 
       - name: Install dependencies
         run: just deps-cli
-
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@v1
-        with:
-          vulkan_version: latest
-          cache: true
 
       - name: Install onnxruntime
         run: |
@@ -175,12 +163,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@v1
-        with:
-          vulkan_version: latest
-          cache: true
-
       - name: Build
         run: just build-release-cli
 
@@ -220,12 +202,6 @@ jobs:
 
       - name: Install dependencies
         run: just deps-desktop
-
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@v1
-        with:
-          vulkan_version: latest
-          cache: true
 
       - name: Build desktop app
         run: just build-release-desktop
@@ -278,12 +254,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@v1
-        with:
-          vulkan_version: latest
-          cache: true
 
       - name: Install Tauri CLI
         run: cargo install tauri-cli
@@ -393,12 +363,6 @@ jobs:
       - name: Install dependencies
         run: just deps-desktop
 
-      - name: Install Vulkan SDK
-        uses: jakoch/install-vulkan-sdk-action@v1
-        with:
-          vulkan_version: latest
-          cache: true
-
       - name: Build desktop app
         run: just build-release-desktop
 
@@ -437,6 +401,8 @@ jobs:
     name: "Mobile: Android (Alpha)"
     needs: [prepare]
     runs-on: ubuntu-latest
+    # Optional: a failed Android build must not block the desktop/CLI release.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -467,13 +433,29 @@ jobs:
         run: cargo install tauri-cli
 
       - name: Build mobile app
+        id: android_build
+        # Android is optional until the APK build is verified on the fork.
+        # A failure here must not block the other release artifacts.
+        continue-on-error: true
         run: just build-release-mobile
 
       - name: Upload APK
+        if: steps.android_build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: whis-mobile-apk
           path: crates/whis-mobile/gen/android/app/build/outputs/apk/universal/release/*.apk
+
+  android-status:
+    name: Android Status
+    needs: [build-mobile-android]
+    # Always report a result so a failed optional Android build cannot block
+    # the release, while still making the release wait for it to finish.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report Android result
+        run: echo "Android build result is ${{ needs.build-mobile-android.result }}"
 
   validate-builds:
     name: Validate All Builds
@@ -487,7 +469,7 @@ jobs:
       - build-desktop-windows
       - build-desktop-macos
       - build-desktop-macos-intel
-      - build-mobile-android
+      - android-status
     runs-on: ubuntu-latest
     steps:
       - name: All builds succeeded
