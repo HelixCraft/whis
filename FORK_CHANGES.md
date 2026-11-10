@@ -6,8 +6,8 @@ changes, removed code, and build/documentation changes, not just the most recent
 work.
 
 - Upstream baseline: `0e39d9a` (`feat(settings): separate CLI and desktop config storage`)
-- Fork HEAD at the time of writing: `84a0dde`
-- Fork commits ahead of upstream: 5
+- Fork HEAD at the time of writing: `a12f708`
+- Fork commits ahead of upstream: 6
 
 | Commit | Summary |
 |---|---|
@@ -16,6 +16,8 @@ work.
 | `3500d78` | Roadmap in `TODO.md` |
 | `2f7fc74` | Core audio cleanup and enhanced transcription API |
 | `84a0dde` | Desktop cleanup settings, quality metrics, and test recording |
+| `17027f7` | Fork changes documentation |
+| `a12f708` | Release workflow adapted for the CPU-only fork |
 
 ---
 
@@ -278,6 +280,26 @@ used by both the progressive and batch paths.
   repository change.
 - The `__TAURI_BUNDLE_TYPE variable not found` message during AppImage bundling
   is harmless updater metadata noise.
+
+### Release CI
+
+`.github/workflows/release.yml` is upstream's multi-platform release workflow,
+adapted for this fork:
+
+- All Vulkan SDK steps were removed; the fork builds with the portable CPU
+  backend.
+- Android is optional. The APK build step uses `continue-on-error`, and a
+  separate `android-status` gate always succeeds, so a failed APK build does not
+  block the desktop and CLI artifacts. The release still waits for Android to
+  finish, so a successful APK is included.
+- The workflow builds CLI tarballs for Linux x86_64/ARM64 and macOS
+  Intel/Apple Silicon, a Windows CLI zip, desktop AppImage/deb/rpm (x86_64 and
+  ARM64), Windows MSI/EXE, macOS DMG (Apple Silicon and Intel), and the Android
+  APK.
+- Trigger: push a `v*` tag, or run it manually:
+  `gh workflow run -R HelixCraft/whis "Build Release" --ref main -f tag=v0.7.2`.
+- The release is created as a draft and must be published manually.
+- No signing certificate is configured, so Windows/macOS warn on first launch.
 
 ---
 
