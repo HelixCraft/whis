@@ -7,14 +7,15 @@
 //!   protection. It only removes energy below the speech band and only
 //!   amplifies quiet speech, so a recording from a good microphone is not made
 //!   worse.
-//! - Optional spectral denoising ([`EnhanceMode::AutoDenoise`] /
+//! - Optional denoising ([`EnhanceMode::AutoDenoise`] /
 //!   [`EnhanceMode::StrongDenoise`]). This is the only stage that can introduce
-//!   artifacts, so it is opt-in or gated by a measured SNR.
+//!   artifacts, so it is opt-in or gated by a measured SNR. The algorithm is
+//!   selectable, see [`crate::audio::denoise`].
 //!
 //! Everything is designed for speed: the light chain is a handful of biquads
 //! plus a level analysis and stays in the low single-digit milliseconds for a
-//! 90 second chunk. The denoiser uses a small radix-2 FFT and needs no extra
-//! dependency.
+//! 90 second chunk. The classical denoisers run at roughly one percent of real
+//! time, the neural ones at a few percent.
 //!
 //! The stored recording is never modified. Callers hand in a sample buffer,
 //! receive a processed copy (unless the mode is off), and keep the original.
@@ -26,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::audio::ProgressiveChunk;
+use crate::audio::denoise::{self, DenoiseAlgorithm, DenoiseStrength};
 use crate::resample::WHISPER_SAMPLE_RATE;
 
 /// Sample rate of the pipeline (16 kHz mono).
@@ -52,13 +54,6 @@ const HIGH_PASS_HZ: f32 = 60.0;
 /// Level analysis frame (20 ms).
 const ANALYSIS_FRAME: usize = 320;
 
-/// Denoiser STFT settings. 32 ms window, 8 ms hop, Hann analysis/synthesis.
-const FFT_SIZE: usize = 512;
-const FFT_HOP: usize = FFT_SIZE / 4;
-/// Frames per noise-estimate block and blocks kept in the minimum tracker.
-const NOISE_BLOCK_FRAMES: usize = 20;
-const NOISE_BLOCKS: usize = 16;
-
 /// How aggressively the cleanup chain works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EnhanceMode {
@@ -72,7 +67,10 @@ pub enum EnhanceMode {
     /// Light, plus denoising when the recording is measured as noisy.
     #[serde(rename = "auto")]
     AutoDenoise,
-    /// Light, plus denoising on every recording.
+    /// Light, plus denoising on every recording at balanced strength.
+    #[serde(rename = "denoise")]
+    Denoise,
+    /// Light, plus denoising on every recording at strong attenuation.
     #[serde(rename = "strong")]
     StrongDenoise,
 }
@@ -83,6 +81,7 @@ impl EnhanceMode {
             Self::Off => "off",
             Self::Light => "light",
             Self::AutoDenoise => "auto",
+            Self::Denoise => "denoise",
             Self::StrongDenoise => "strong",
         }
     }
@@ -92,6 +91,7 @@ impl EnhanceMode {
             Self::Off => "Off",
             Self::Light => "Light",
             Self::AutoDenoise => "Auto denoise",
+            Self::Denoise => "Denoise",
             Self::StrongDenoise => "Strong denoise",
         }
     }
@@ -106,18 +106,22 @@ impl EnhanceMode {
 #[serde(default)]
 pub struct AudioEnhanceSettings {
     pub mode: EnhanceMode,
+    /// Algorithm used when the mode enables denoising.
+    pub algorithm: DenoiseAlgorithm,
 }
 
 /// Snapshot of the cleanup configuration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EnhanceConfig {
     pub mode: EnhanceMode,
+    pub algorithm: DenoiseAlgorithm,
 }
 
 impl From<AudioEnhanceSettings> for EnhanceConfig {
     fn from(settings: AudioEnhanceSettings) -> Self {
         Self {
             mode: settings.mode,
+            algorithm: settings.algorithm,
         }
     }
 }
@@ -126,6 +130,7 @@ impl From<&AudioEnhanceSettings> for EnhanceConfig {
     fn from(settings: &AudioEnhanceSettings) -> Self {
         Self {
             mode: settings.mode,
+            algorithm: settings.algorithm,
         }
     }
 }
@@ -143,6 +148,14 @@ pub struct EnhanceStats {
     pub hum_hz: Option<f32>,
     pub clipping: bool,
     pub denoised: bool,
+    /// Algorithm that ran, if any.
+    pub denoise_algorithm: Option<DenoiseAlgorithm>,
+    /// Wall-clock time the denoiser needed for this chunk.
+    pub denoise_ms: f32,
+    /// Noise floor of the processed audio, including the normalisation gain.
+    pub output_noise_dbfs: f32,
+    /// Estimated SNR after processing.
+    pub output_snr_db: f32,
     pub gated: bool,
     pub duration_secs: f32,
 }
@@ -160,6 +173,14 @@ pub struct AudioQuality {
     pub hum_hz: Option<f32>,
     pub clipping: bool,
     pub denoised: bool,
+    /// Algorithm that ran on the last chunk.
+    pub denoise_algorithm: Option<DenoiseAlgorithm>,
+    /// Total time spent denoising the recording.
+    pub denoise_ms: f32,
+    /// Noise floor of the processed audio.
+    pub output_noise_dbfs: f32,
+    /// Estimated SNR after processing.
+    pub output_snr_db: f32,
     pub chunks: usize,
     pub gated_chunks: usize,
     pub duration_secs: f32,
@@ -183,6 +204,11 @@ impl AudioQuality {
             self.noise_dbfs =
                 (self.noise_dbfs * self.duration_secs + stats.noise_dbfs * weight) / total;
             self.snr_db = (self.snr_db * self.duration_secs + stats.snr_db * weight) / total;
+            self.output_noise_dbfs = (self.output_noise_dbfs * self.duration_secs
+                + stats.output_noise_dbfs * weight)
+                / total;
+            self.output_snr_db =
+                (self.output_snr_db * self.duration_secs + stats.output_snr_db * weight) / total;
         }
         self.duration_secs = total;
 
@@ -192,6 +218,10 @@ impl AudioQuality {
         }
         self.clipping |= stats.clipping;
         self.denoised |= stats.denoised;
+        if stats.denoised {
+            self.denoise_algorithm = stats.denoise_algorithm;
+        }
+        self.denoise_ms += stats.denoise_ms;
         self.chunks += 1;
         if stats.gated {
             self.gated_chunks += 1;
@@ -233,6 +263,7 @@ pub fn enhance_owned(samples: Vec<f32>, config: &EnhanceConfig) -> Enhanced {
                 rms_dbfs: -120.0,
                 speech_dbfs: -120.0,
                 noise_dbfs: -120.0,
+                output_noise_dbfs: -120.0,
                 duration_secs,
                 ..Default::default()
             },
@@ -245,7 +276,16 @@ pub fn enhance_owned(samples: Vec<f32>, config: &EnhanceConfig) -> Enhanced {
     if !config.mode.uses_basic_chain() {
         return Enhanced {
             samples,
-            stats: stats_from_analysis(&analysis, duration_secs, 0.0, false, false),
+            stats: stats_from_analysis(
+                &analysis,
+                duration_secs,
+                0.0,
+                false,
+                None,
+                0.0,
+                OutputLevels::unchanged(&analysis),
+                false,
+            ),
         };
     }
 
@@ -272,14 +312,27 @@ pub fn enhance_owned(samples: Vec<f32>, config: &EnhanceConfig) -> Enhanced {
                 && analysis.speech_dbfs > MIN_SPEECH_DBFS
         }
         EnhanceMode::StrongDenoise => analysis.speech_dbfs > MIN_SPEECH_DBFS,
+        EnhanceMode::Denoise => analysis.speech_dbfs > MIN_SPEECH_DBFS,
         _ => false,
     };
 
-    let denoised = denoised
-        && match config.mode {
-            EnhanceMode::StrongDenoise => spectral_denoise(&mut samples, DenoiseStrength::Strong),
-            _ => spectral_denoise(&mut samples, DenoiseStrength::Auto),
-        };
+    let strength = match config.mode {
+        EnhanceMode::StrongDenoise => DenoiseStrength::Strong,
+        _ => DenoiseStrength::Balanced,
+    };
+    let mut denoise_ms = 0.0f32;
+    let mut denoise_algorithm = None;
+    let denoised = if denoised {
+        let started = std::time::Instant::now();
+        let applied = denoise::denoise(&mut samples, config.algorithm, strength);
+        denoise_ms = started.elapsed().as_secs_f32() * 1000.0;
+        if applied {
+            denoise_algorithm = Some(config.algorithm);
+        }
+        applied
+    } else {
+        false
+    };
 
     // Normalise after filtering so the measured speech level matches the audio
     // that is actually sent to the model.
@@ -297,8 +350,41 @@ pub fn enhance_owned(samples: Vec<f32>, config: &EnhanceConfig) -> Enhanced {
     let output_rms = rms_of(&samples);
     let gated = to_db(output_peak) < GATE_PEAK_DBFS && to_db(output_rms) < GATE_RMS_DBFS;
 
-    let stats = stats_from_analysis(&analysis, duration_secs, gain_db, denoised, gated);
+    let stats = stats_from_analysis(
+        &analysis,
+        duration_secs,
+        gain_db,
+        denoised,
+        denoise_algorithm,
+        denoise_ms,
+        OutputLevels::after_processing(&post_levels, gain_db),
+        gated,
+    );
     Enhanced { samples, stats }
+}
+
+/// Level of the processed buffer, used to report what the chain actually did.
+#[derive(Debug, Clone, Copy)]
+struct OutputLevels {
+    noise_dbfs: f32,
+    snr_db: f32,
+}
+
+impl OutputLevels {
+    fn unchanged(analysis: &Analysis) -> Self {
+        Self {
+            noise_dbfs: analysis.noise_dbfs,
+            snr_db: analysis.snr_db,
+        }
+    }
+
+    fn after_processing(levels: &Levels, gain_db: f32) -> Self {
+        Self {
+            noise_dbfs: levels.noise_dbfs + gain_db,
+            // The normalisation gain affects speech and noise equally.
+            snr_db: (levels.speech_dbfs - levels.noise_dbfs).clamp(0.0, 60.0),
+        }
+    }
 }
 
 fn stats_from_analysis(
@@ -306,6 +392,9 @@ fn stats_from_analysis(
     duration_secs: f32,
     gain_db: f32,
     denoised: bool,
+    denoise_algorithm: Option<DenoiseAlgorithm>,
+    denoise_ms: f32,
+    output: OutputLevels,
     gated: bool,
 ) -> EnhanceStats {
     EnhanceStats {
@@ -318,6 +407,10 @@ fn stats_from_analysis(
         hum_hz: analysis.hum_hz,
         clipping: analysis.clipping,
         denoised,
+        denoise_algorithm,
+        denoise_ms,
+        output_noise_dbfs: output.noise_dbfs,
+        output_snr_db: output.snr_db,
         gated,
         duration_secs,
     }
@@ -639,218 +732,6 @@ impl Biquad {
 }
 
 // ---------------------------------------------------------------------------
-// Spectral denoising
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy)]
-enum DenoiseStrength {
-    Auto,
-    Strong,
-}
-
-/// Reduce stationary noise with a smoothed Wiener-style spectral gain.
-///
-/// Returns false when the buffer is too short to process. The attenuation is
-/// floored (8 dB in auto mode, 14 dB in strong mode), so speech is never gated
-/// to zero and no words can disappear.
-fn spectral_denoise(samples: &mut [f32], strength: DenoiseStrength) -> bool {
-    if samples.len() < FFT_SIZE {
-        return false;
-    }
-
-    let (oversubtraction, floor_db) = match strength {
-        DenoiseStrength::Auto => (1.2f32, -8.0f32),
-        DenoiseStrength::Strong => (2.0f32, -14.0f32),
-    };
-    let floor = 10f32.powf(floor_db / 20.0);
-    let bins = FFT_SIZE / 2 + 1;
-
-    let window: Vec<f32> = (0..FFT_SIZE)
-        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos())
-        .collect();
-
-    let frames = samples.len().div_ceil(FFT_HOP);
-    let output_len = (frames - 1) * FFT_HOP + FFT_SIZE;
-    let mut accumulated = vec![0.0f32; output_len];
-    let mut window_sum = vec![0.0f32; output_len];
-
-    let mut noise = vec![0.0f32; bins];
-    let mut block_min = vec![f32::INFINITY; bins];
-    let mut noise_ring = vec![f32::INFINITY; bins * NOISE_BLOCKS];
-    let mut ring_pos = 0usize;
-    let mut block_frames = 0usize;
-    let mut initiated = false;
-
-    let mut raw_gain = vec![1.0f32; bins];
-    let mut frequency_smoothed = vec![1.0f32; bins];
-    let mut smooth_gain = vec![1.0f32; bins];
-    let mut spectrum_gain = vec![1.0f32; FFT_SIZE];
-
-    let mut real = vec![0.0f32; FFT_SIZE];
-    let mut imaginary = vec![0.0f32; FFT_SIZE];
-    let mut power = vec![0.0f32; bins];
-
-    for frame in 0..frames {
-        let start = frame * FFT_HOP;
-
-        for i in 0..FFT_SIZE {
-            let sample = samples.get(start + i).copied().unwrap_or(0.0);
-            real[i] = sample * window[i];
-            imaginary[i] = 0.0;
-        }
-
-        fft(&mut real, &mut imaginary, false);
-
-        for bin in 0..bins {
-            power[bin] = real[bin] * real[bin] + imaginary[bin] * imaginary[bin];
-        }
-
-        if !initiated {
-            noise.copy_from_slice(&power);
-            initiated = true;
-        }
-
-        for bin in 0..bins {
-            block_min[bin] = block_min[bin].min(power[bin]);
-        }
-        block_frames += 1;
-        if block_frames >= NOISE_BLOCK_FRAMES {
-            for bin in 0..bins {
-                noise_ring[ring_pos * bins + bin] = block_min[bin];
-                block_min[bin] = f32::INFINITY;
-            }
-            ring_pos = (ring_pos + 1) % NOISE_BLOCKS;
-            block_frames = 0;
-
-            for bin in 0..bins {
-                let mut minimum = f32::INFINITY;
-                for block in 0..NOISE_BLOCKS {
-                    minimum = minimum.min(noise_ring[block * bins + bin]);
-                }
-                if minimum.is_finite() {
-                    noise[bin] = minimum;
-                }
-            }
-        }
-
-        for bin in 0..bins {
-            let p = power[bin].max(1e-12);
-            let n = noise[bin].max(1e-12);
-            let clean = (p - oversubtraction * n).max(0.0);
-            raw_gain[bin] = (clean / p).sqrt().max(floor);
-        }
-
-        // Smooth across frequency, then over time, to avoid musical noise.
-        for bin in 0..bins {
-            let left = raw_gain[bin.saturating_sub(1)];
-            let right = raw_gain[(bin + 1).min(bins - 1)];
-            frequency_smoothed[bin] = (left + 2.0 * raw_gain[bin] + right) * 0.25;
-        }
-        for bin in 0..bins {
-            smooth_gain[bin] = 0.6 * smooth_gain[bin] + 0.4 * frequency_smoothed[bin];
-            spectrum_gain[bin] = smooth_gain[bin];
-        }
-        for bin in 1..FFT_SIZE / 2 {
-            spectrum_gain[FFT_SIZE - bin] = spectrum_gain[bin];
-        }
-
-        for i in 0..FFT_SIZE {
-            real[i] *= spectrum_gain[i];
-            imaginary[i] *= spectrum_gain[i];
-        }
-
-        fft(&mut real, &mut imaginary, true);
-
-        for i in 0..FFT_SIZE {
-            let index = start + i;
-            if index >= output_len {
-                break;
-            }
-            accumulated[index] += real[i] * window[i];
-            window_sum[index] += window[i] * window[i];
-        }
-    }
-
-    for (index, sample) in samples.iter_mut().enumerate() {
-        let normalisation = window_sum[index];
-        if normalisation > 1e-3 {
-            *sample = accumulated[index] / normalisation;
-        }
-        // At the very first and last samples the Hann window sum is near zero.
-        // Keeping the original sample there avoids a click at the edges.
-    }
-
-    true
-}
-
-/// In-place iterative radix-2 FFT. `inverse` also applies the 1/N scaling.
-fn fft(real: &mut [f32], imaginary: &mut [f32], inverse: bool) {
-    let n = real.len();
-    debug_assert_eq!(n, imaginary.len());
-    if n <= 1 {
-        return;
-    }
-    debug_assert!(n.is_power_of_two());
-
-    let mut j = 0usize;
-    for i in 1..n {
-        let mut bit = n >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j ^= bit;
-        if i < j {
-            real.swap(i, j);
-            imaginary.swap(i, j);
-        }
-    }
-
-    let sign = if inverse { 1.0 } else { -1.0 };
-    let mut length = 2usize;
-    while length <= n {
-        let angle = sign * 2.0 * std::f32::consts::PI / length as f32;
-        let (step_imag, step_real) = angle.sin_cos();
-        let half = length / 2;
-
-        for start in (0..n).step_by(length) {
-            let (mut twiddle_real, mut twiddle_imag) = (1.0f32, 0.0f32);
-            for offset in 0..half {
-                let even = start + offset;
-                let odd = even + half;
-
-                let odd_real = real[odd] * twiddle_real - imaginary[odd] * twiddle_imag;
-                let odd_imag = real[odd] * twiddle_imag + imaginary[odd] * twiddle_real;
-
-                let even_real = real[even];
-                let even_imag = imaginary[even];
-
-                real[even] = even_real + odd_real;
-                imaginary[even] = even_imag + odd_imag;
-                real[odd] = even_real - odd_real;
-                imaginary[odd] = even_imag - odd_imag;
-
-                let next_real = twiddle_real * step_real - twiddle_imag * step_imag;
-                twiddle_imag = twiddle_real * step_imag + twiddle_imag * step_real;
-                twiddle_real = next_real;
-            }
-        }
-
-        length <<= 1;
-    }
-
-    if inverse {
-        let scale = 1.0 / n as f32;
-        for value in real.iter_mut() {
-            *value *= scale;
-        }
-        for value in imaginary.iter_mut() {
-            *value *= scale;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Progressive and realtime integration
 // ---------------------------------------------------------------------------
 
@@ -1007,6 +888,7 @@ mod tests {
     fn light() -> EnhanceConfig {
         EnhanceConfig {
             mode: EnhanceMode::Light,
+            ..Default::default()
         }
     }
 
@@ -1081,6 +963,7 @@ mod tests {
             &samples,
             &EnhanceConfig {
                 mode: EnhanceMode::AutoDenoise,
+                ..Default::default()
             },
         );
 
@@ -1110,6 +993,7 @@ mod tests {
             &samples,
             &EnhanceConfig {
                 mode: EnhanceMode::AutoDenoise,
+                ..Default::default()
             },
         );
 
@@ -1123,6 +1007,7 @@ mod tests {
             &samples,
             &EnhanceConfig {
                 mode: EnhanceMode::StrongDenoise,
+                ..Default::default()
             },
         );
 
@@ -1146,6 +1031,7 @@ mod tests {
             &samples,
             &EnhanceConfig {
                 mode: EnhanceMode::StrongDenoise,
+                ..Default::default()
             },
         );
 
@@ -1153,19 +1039,78 @@ mod tests {
         assert_eq!(enhanced.samples.len(), samples.len());
     }
 
+    fn noisy_bursts(seconds: f32) -> Vec<f32> {
+        let mut samples = Vec::with_capacity((RATE * seconds) as usize);
+        let mut state = 0x9e37_79b9u32;
+        let blocks = (seconds * 2.0) as usize;
+        for block in 0..blocks {
+            for index in 0..(RATE as usize / 2) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = ((state >> 8) as f32 / 8_388_608.0 - 1.0) * 0.04;
+                // A gliding pitch and a 4 Hz envelope: a steady tone would be
+                // learned as noise and is not a fair speech proxy.
+                let speech = if block % 2 == 0 {
+                    let time = index as f32 / RATE;
+                    let pitch = 130.0 + 15.0 * (2.0 * std::f32::consts::PI * 3.0 * time).sin();
+                    let mut value = 0.0;
+                    for harmonic in 1..12 {
+                        let frequency = pitch * harmonic as f32;
+                        let envelope = (-((frequency - 700.0) / 320.0).powi(2)).exp()
+                            + 0.6 * (-((frequency - 1200.0) / 420.0).powi(2)).exp()
+                            + 0.35 * (-((frequency - 2600.0) / 620.0).powi(2)).exp();
+                        value += envelope / harmonic as f32
+                            * (2.0 * std::f32::consts::PI * frequency * time).sin();
+                    }
+                    let modulation = 0.6 + 0.4 * (2.0 * std::f32::consts::PI * 4.0 * time).sin();
+                    0.14 * modulation * value
+                } else {
+                    0.0
+                };
+                samples.push(speech + noise);
+            }
+        }
+        samples
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len().max(1) as f32).sqrt()
+    }
+
     #[test]
-    fn fft_roundtrip_is_lossless() {
-        let mut real: Vec<f32> = (0..FFT_SIZE)
-            .map(|i| (i as f32 * 0.1).sin() + 0.3 * (i as f32 * 0.7).cos())
-            .collect();
-        let original = real.clone();
-        let mut imaginary = vec![0.0f32; FFT_SIZE];
+    fn every_algorithm_reduces_noise_and_keeps_length() {
+        // Only the noise-only blocks are compared: they must get quieter while
+        // the speech blocks keep their level.
+        for algorithm in crate::audio::denoise::ALGORITHMS {
+            let samples = noisy_bursts(2.0);
+            let enhanced = enhance(
+                &samples,
+                &EnhanceConfig {
+                    mode: EnhanceMode::StrongDenoise,
+                    algorithm,
+                },
+            );
 
-        fft(&mut real, &mut imaginary, false);
-        fft(&mut real, &mut imaginary, true);
+            assert_eq!(enhanced.samples.len(), samples.len());
+            assert!(enhanced.stats.denoised, "{algorithm:?} did not run");
+            assert_eq!(enhanced.stats.denoise_algorithm, Some(algorithm));
+            assert!(enhanced.stats.denoise_ms >= 0.0);
+            assert!(enhanced.samples.iter().all(|s| s.is_finite()));
 
-        for (a, b) in real.iter().zip(original.iter()) {
-            assert!((a - b).abs() < 1e-4, "fft roundtrip mismatch: {a} vs {b}");
+            let pause = RATE as usize / 2..RATE as usize;
+            let before = rms(&samples[pause.clone()]);
+            let after = rms(&enhanced.samples[pause]);
+            assert!(
+                after < before * 0.85,
+                "{algorithm:?} did not reduce the pause: {before} -> {after}"
+            );
+
+            let speech = RATE as usize..RATE as usize * 3 / 2;
+            let speech_before = rms(&samples[speech.clone()]);
+            let speech_after = rms(&enhanced.samples[speech]);
+            assert!(
+                speech_after > speech_before * 0.5,
+                "{algorithm:?} removed too much speech: {speech_before} -> {speech_after}"
+            );
         }
     }
 

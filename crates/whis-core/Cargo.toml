@@ -42,6 +42,11 @@ audioadapter-buffers = "2.0"
 # Voice Activity Detection using Silero VAD model
 voice_activity_detector = { version = "0.2", optional = true }
 
+# Neural speech denoisers (pure Rust, no native dependencies)
+nnnoiseless = "0.5"
+deep-filter-rt = "0.2"
+ndarray = "0.17"
+
 # Local ONNX transcription (Parakeet) via transcribe-rs
 transcribe-rs = { version = "0.3", features = ["onnx"], optional = true }
 

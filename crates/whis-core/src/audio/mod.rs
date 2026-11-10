@@ -34,6 +34,7 @@
 //! - **Linux**: ALSA stderr suppression via safe FFI wrapper
 
 pub mod chunker;
+pub mod denoise;
 mod devices;
 mod encoder;
 pub mod enhance;
@@ -50,6 +51,7 @@ mod pulse;
 
 // Re-export public types
 pub use chunker::{AudioChunk as ProgressiveChunk, ChunkerConfig, ProgressiveChunker};
+pub use denoise::{ALGORITHMS as DENOISE_ALGORITHMS, DenoiseAlgorithm, DenoiseStrength};
 pub use devices::list_audio_devices;
 pub use encoder::{AudioEncoder, create_encoder};
 pub use enhance::{

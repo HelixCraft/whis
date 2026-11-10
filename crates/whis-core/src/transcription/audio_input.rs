@@ -35,6 +35,7 @@ pub async fn transcribe_samples(
         samples,
         &EnhanceConfig {
             mode: EnhanceMode::Off,
+            ..Default::default()
         },
     )
     .await
