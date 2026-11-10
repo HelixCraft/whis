@@ -42,6 +42,14 @@ pub struct UiSettings {
     #[serde(default)]
     pub microphone_device: Option<String>,
 
+    /// Cleanup applied to the audio before it is sent to the model.
+    ///
+    /// The light chain removes rumble and detected mains hum and normalises
+    /// the level. Denoising is optional because it is the only stage that can
+    /// introduce artifacts.
+    #[serde(default)]
+    pub audio_enhance: crate::audio::enhance::AudioEnhanceSettings,
+
     /// Voice Activity Detection (VAD) settings.
     ///
     /// When enabled, whis will skip silence during recording,
@@ -297,6 +305,7 @@ impl Default for UiSettings {
             #[cfg(feature = "clipboard")]
             clipboard_backend: ClipboardMethod::default(),
             microphone_device: None,
+            audio_enhance: crate::audio::enhance::AudioEnhanceSettings::default(),
             vad: VadSettings::default(),
             active_preset: None,
             chunk_duration_secs: crate::configuration::DEFAULT_CHUNK_DURATION_SECS,

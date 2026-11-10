@@ -13,7 +13,7 @@ mod post_processing;
 mod transcribe;
 mod warmup;
 
-pub use audio_input::transcribe_samples;
+pub use audio_input::{transcribe_samples, transcribe_samples_enhanced};
 
 pub use ollama::{
     DEFAULT_OLLAMA_MODEL, DEFAULT_OLLAMA_URL, OLLAMA_MODEL_OPTIONS, OllamaModel,

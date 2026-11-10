@@ -187,7 +187,8 @@ fn info_from_meta(wav_path: PathBuf, meta: &LastAudioMeta) -> LastAudioInfo {
     }
 }
 
-fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
+/// Write 16 kHz mono samples as a 16-bit PCM WAV file.
+pub fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).context("Failed to create data directory")?;
     }
@@ -215,7 +216,8 @@ fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
     Ok(())
 }
 
-fn read_wav(path: &Path) -> Result<Vec<f32>> {
+/// Read a 16 kHz mono WAV file into normalized f32 samples.
+pub fn read_wav(path: &Path) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::open(path).context("Failed to open recording")?;
     let spec = reader.spec();
     if spec.channels != 1 || spec.sample_rate != SAMPLE_RATE {

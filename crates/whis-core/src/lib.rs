@@ -48,7 +48,8 @@ pub use transcription::progressive_transcribe_local;
 pub use transcription::{
     DEFAULT_POST_PROCESSING_PROMPT, PostProcessConfig, PostProcessor, WarmupConfig,
     clear_warmup_cache, post_process, preload_ollama, progressive_transcribe_cloud,
-    resolve_post_processor_config, transcribe_samples, warmup_configured,
+    resolve_post_processor_config, transcribe_samples, transcribe_samples_enhanced,
+    warmup_configured,
 };
 
 // Re-export provider types

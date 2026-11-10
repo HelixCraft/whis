@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 
+use crate::audio::enhance::{self, AudioQuality, EnhanceConfig, EnhanceMode};
 use crate::config::TranscriptionProvider;
 use crate::http::get_http_client;
 use crate::provider::{TranscriptionRequest, registry};
@@ -27,21 +28,58 @@ pub async fn transcribe_samples(
     language: Option<&str>,
     samples: Vec<f32>,
 ) -> Result<String> {
+    transcribe_samples_enhanced(
+        provider,
+        api_key_or_model_path,
+        language,
+        samples,
+        &EnhanceConfig {
+            mode: EnhanceMode::Off,
+        },
+    )
+    .await
+    .map(|(text, _)| text)
+}
+
+/// Transcribe 16 kHz mono samples and report the measured audio quality.
+///
+/// The cleanup chain runs before chunking, so the whole recording gets a
+/// consistent level. A recording that contains no usable audio at all is
+/// skipped (empty text, `gated` in the quality report) instead of being sent to
+/// the model, where it would only produce hallucinations.
+pub async fn transcribe_samples_enhanced(
+    provider: &TranscriptionProvider,
+    api_key_or_model_path: &str,
+    language: Option<&str>,
+    samples: Vec<f32>,
+    enhance_config: &EnhanceConfig,
+) -> Result<(String, AudioQuality)> {
     if samples.is_empty() {
         anyhow::bail!("No audio to transcribe");
     }
+
+    let enhanced = enhance::enhance_owned(samples, enhance_config);
+    let mut quality = AudioQuality::default();
+    quality.add(&enhanced.stats);
+
+    if enhanced.stats.gated {
+        return Ok((String::new(), quality));
+    }
+
+    let samples = enhanced.samples;
 
     if provider.is_local() {
         #[cfg(feature = "local-transcription")]
         {
             let model_path = api_key_or_model_path.to_string();
             let language = language.map(str::to_string);
-            return tokio::task::spawn_blocking(move || {
+            let text = tokio::task::spawn_blocking(move || {
                 crate::provider::transcribe_local(&model_path, samples, language.as_deref())
             })
             .await
             .context("Transcription task panicked")?
-            .map(|result| result.text);
+            .map(|result| result.text)?;
+            return Ok((text, quality));
         }
         #[cfg(not(feature = "local-transcription"))]
         {
@@ -49,7 +87,8 @@ pub async fn transcribe_samples(
         }
     }
 
-    transcribe_cloud_samples(provider, api_key_or_model_path, language, samples).await
+    let text = transcribe_cloud_samples(provider, api_key_or_model_path, language, samples).await?;
+    Ok((text, quality))
 }
 
 async fn transcribe_cloud_samples(

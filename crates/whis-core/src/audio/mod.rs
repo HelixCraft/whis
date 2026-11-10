@@ -36,6 +36,7 @@
 pub mod chunker;
 mod devices;
 mod encoder;
+pub mod enhance;
 pub mod error;
 #[cfg(feature = "history")]
 pub mod last_recording;
@@ -51,6 +52,10 @@ mod pulse;
 pub use chunker::{AudioChunk as ProgressiveChunk, ChunkerConfig, ProgressiveChunker};
 pub use devices::list_audio_devices;
 pub use encoder::{AudioEncoder, create_encoder};
+pub use enhance::{
+    AudioEnhanceSettings, AudioQuality, EnhanceConfig, EnhanceMode, EnhanceStats, Enhanced,
+    StreamEnhancer, enhance, enhance_audio_stream, enhance_chunk_stream, enhance_owned,
+};
 pub use error::AudioError;
 pub use recorder::{AudioRecorder, AudioStreamSender, RecorderConfig, RecordingData};
 pub use types::AudioDeviceInfo;
