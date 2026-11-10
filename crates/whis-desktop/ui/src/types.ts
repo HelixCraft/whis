@@ -59,6 +59,7 @@ export interface Settings {
     microphone_device: string | null
     audio_enhance: {
       mode: EnhanceMode
+      algorithm: DenoiseAlgorithm
     }
     chunk_duration_secs: number
     output_method: OutputMethod
@@ -90,7 +91,10 @@ export interface Settings {
 export type OutputMethod = 'clipboard' | 'autotype' | 'both'
 
 // Cleanup applied to the audio before transcription
-export type EnhanceMode = 'off' | 'light' | 'auto' | 'strong'
+export type EnhanceMode = 'off' | 'light' | 'auto' | 'denoise' | 'strong'
+
+// Noise suppression algorithm used when denoising is enabled
+export type DenoiseAlgorithm = 'subtraction' | 'wiener' | 'mmse-lsa' | 'rnnoise' | 'deepfilter'
 
 // Which backend to use for autotyping (when OutputMethod includes autotype)
 export type AutotypeBackend = 'auto' | 'tools' | 'enigo'
@@ -185,6 +189,10 @@ export interface AudioQuality {
   hum_hz: number | null
   clipping: boolean
   denoised: boolean
+  denoise_algorithm: DenoiseAlgorithm | null
+  denoise_ms: number
+  output_noise_dbfs: number
+  output_snr_db: number
   chunks: number
   gated_chunks: number
   duration_secs: number
@@ -197,6 +205,7 @@ export interface AudioTestResult {
   duration_secs: number
   quality: AudioQuality
   mode: EnhanceMode
+  algorithm: DenoiseAlgorithm
 }
 
 // Preset info from backend

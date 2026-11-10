@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { TranscriptionMode } from '../components/settings/ModeCards.vue'
-import type { EnhanceMode, OutputMethod, PostProcessor, Provider, SelectOption } from '../types'
+import type { DenoiseAlgorithm, EnhanceMode, OutputMethod, PostProcessor, Provider, SelectOption } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { computed, onMounted, ref } from 'vue'
 import AppSelect from '../components/AppSelect.vue'
@@ -203,13 +203,44 @@ const enhanceMode = computed(() => settingsStore.state.ui.audio_enhance.mode)
 const enhanceModeOptions: SelectOption[] = [
   { value: 'off', label: 'Off' },
   { value: 'light', label: 'Light (recommended)' },
-  { value: 'auto', label: 'Auto denoise' },
+  { value: 'auto', label: 'Auto denoise (only when noisy)' },
+  { value: 'denoise', label: 'Denoise always' },
   { value: 'strong', label: 'Strong denoise' },
 ]
 
 function handleEnhanceModeChange(value: string | null) {
   if (value) {
     settingsStore.setEnhanceMode(value as EnhanceMode)
+  }
+}
+
+// Denoise algorithm, only relevant while denoising is enabled
+const denoiseAlgorithm = computed(() => settingsStore.state.ui.audio_enhance.algorithm)
+const denoiseEnabled = computed(() =>
+  ['auto', 'denoise', 'strong'].includes(enhanceMode.value),
+)
+
+const denoiseAlgorithmOptions: SelectOption[] = [
+  { value: 'subtraction', label: 'Spectral subtraction (fastest)' },
+  { value: 'wiener', label: 'Wiener filter' },
+  { value: 'mmse-lsa', label: 'MMSE-LSA (recommended)' },
+  { value: 'rnnoise', label: 'RNNoise (neural)' },
+  { value: 'deepfilter', label: 'DeepFilterNet3 (strongest)' },
+]
+
+const denoiseAlgorithmHints: Record<DenoiseAlgorithm, string> = {
+  'subtraction': 'Classic spectral subtraction. Fastest, but can leave a light ringing on noise.',
+  'wiener': 'Wiener gain with smoother noise tracking. A good balance of speed and quality.',
+  'mmse-lsa': 'Ephraim-Malah estimator. Best classical result, keeps quiet consonants intact.',
+  'rnnoise': 'Small neural network trained on speech. Very fast, clear on steady noise.',
+  'deepfilter': 'DeepFilterNet3. Strongest removal of background noise, slightly more CPU.',
+}
+
+const denoiseAlgorithmHint = computed(() => denoiseAlgorithmHints[denoiseAlgorithm.value])
+
+function handleDenoiseAlgorithmChange(value: string | null) {
+  if (value) {
+    settingsStore.setDenoiseAlgorithm(value as DenoiseAlgorithm)
   }
 }
 
@@ -449,10 +480,24 @@ function handleOllamaKeepAliveChange(value: string | null) {
             />
           </div>
 
+          <div v-if="denoiseEnabled" class="field-row">
+            <label>Denoise algorithm</label>
+            <AppSelect
+              :model-value="denoiseAlgorithm"
+              :options="denoiseAlgorithmOptions"
+              @update:model-value="handleDenoiseAlgorithmChange"
+            />
+          </div>
+
           <p class="env-hint">
             <span class="hint-marker">[i]</span>
             Light removes rumble and mains hum and lifts quiet speech without changing loud audio.
             Denoise also has to remove noise, which can leave artifacts, so it is opt-in.
+          </p>
+
+          <p v-if="denoiseEnabled" class="env-hint">
+            <span class="hint-marker">[i]</span>
+            {{ denoiseAlgorithmHint }}
           </p>
 
           <AudioTestCard />

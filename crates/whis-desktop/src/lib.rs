@@ -162,6 +162,7 @@ pub fn run(start_in_tray: bool) {
             commands::get_last_audio_quality,
             // Audio test commands
             commands::record_audio_test,
+            commands::process_audio_test,
             commands::play_audio_test,
             commands::transcribe_audio_test,
             // Preset commands

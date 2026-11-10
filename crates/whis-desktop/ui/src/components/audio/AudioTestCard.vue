@@ -1,18 +1,51 @@
 <script setup lang="ts">
-import type { AudioTestResult } from '../../types'
+import type { AudioTestResult, DenoiseAlgorithm, SelectOption } from '../../types'
 import { invoke } from '@tauri-apps/api/core'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 const recording = ref(false)
+const processing = ref(false)
 const transcribing = ref<'raw' | 'clean' | null>(null)
 const result = ref<AudioTestResult | null>(null)
 const rawText = ref<string | null>(null)
 const cleanText = ref<string | null>(null)
 const error = ref<string | null>(null)
 
+// Settings used for re-processing a stored sample. Both start from whatever the
+// recording used, so the first comparison matches the current configuration.
+const algorithm = ref<DenoiseAlgorithm>('mmse-lsa')
+const strength = ref<'denoise' | 'strong'>('denoise')
+
+const algorithmOptions: SelectOption[] = [
+  { value: 'subtraction', label: 'Spectral subtraction' },
+  { value: 'wiener', label: 'Wiener filter' },
+  { value: 'mmse-lsa', label: 'MMSE-LSA' },
+  { value: 'rnnoise', label: 'RNNoise' },
+  { value: 'deepfilter', label: 'DeepFilterNet3' },
+]
+
+const strengthOptions: SelectOption[] = [
+  { value: 'denoise', label: 'Balanced' },
+  { value: 'strong', label: 'Strong' },
+]
+
 function formatSnr(value: number): string {
   return Number.isFinite(value) ? `${value.toFixed(1)} dB` : 'n/a'
 }
+
+function formatLevel(value: number): string {
+  return Number.isFinite(value) ? `${value.toFixed(1)} dBFS` : 'n/a'
+}
+
+const snrChange = computed(() => {
+  if (!result.value)
+    return ''
+  const input = result.value.quality.snr_db
+  const output = result.value.quality.output_snr_db
+  if (!result.value.quality.denoised)
+    return formatSnr(input)
+  return `${input.toFixed(1)} to ${output.toFixed(1)} dB`
+})
 
 function qualityLabel(snr: number): string {
   if (snr >= 25)
@@ -24,19 +57,65 @@ function qualityLabel(snr: number): string {
   return 'Very noisy'
 }
 
+function formatDuration(milliseconds: number): string {
+  if (milliseconds <= 0)
+    return 'none'
+  return milliseconds >= 1000
+    ? `${(milliseconds / 1000).toFixed(2)} s`
+    : `${milliseconds.toFixed(0)} ms`
+}
+
+const appliedAlgorithm = computed(() => {
+  const applied = result.value?.quality.denoise_algorithm
+  if (!applied)
+    return 'none'
+  return algorithmOptions.find(option => option.value === applied)?.label ?? applied
+})
+
+function handleAlgorithmChange(value: string | null) {
+  if (value)
+    algorithm.value = value as DenoiseAlgorithm
+}
+
+function handleStrengthChange(value: string | null) {
+  if (value)
+    strength.value = value as 'denoise' | 'strong'
+}
+
 async function record() {
   recording.value = true
   error.value = null
   rawText.value = null
   cleanText.value = null
   try {
-    result.value = await invoke<AudioTestResult>('record_audio_test')
+    const recorded = await invoke<AudioTestResult>('record_audio_test')
+    result.value = recorded
+    algorithm.value = recorded.algorithm
+    strength.value = recorded.mode === 'strong' ? 'strong' : 'denoise'
   }
   catch (e) {
     error.value = String(e)
   }
   finally {
     recording.value = false
+  }
+}
+
+async function reprocess() {
+  processing.value = true
+  error.value = null
+  cleanText.value = null
+  try {
+    result.value = await invoke<AudioTestResult>('process_audio_test', {
+      mode: strength.value,
+      algorithm: algorithm.value,
+    })
+  }
+  catch (e) {
+    error.value = String(e)
+  }
+  finally {
+    processing.value = false
   }
 }
 
@@ -82,6 +161,32 @@ async function transcribe(kind: 'raw' | 'clean') {
       </button>
     </div>
 
+    <div v-if="result" class="test-apply">
+      <div class="apply-field">
+        <label>Algorithm</label>
+        <AppSelect
+          :model-value="algorithm"
+          :options="algorithmOptions"
+          @update:model-value="handleAlgorithmChange"
+        />
+      </div>
+      <div class="apply-field">
+        <label>Strength</label>
+        <AppSelect
+          :model-value="strength"
+          :options="strengthOptions"
+          @update:model-value="handleStrengthChange"
+        />
+      </div>
+      <button class="btn btn-secondary btn-small" :disabled="processing" @click="reprocess">
+        {{ processing ? 'Processing...' : 'Apply to sample' }}
+      </button>
+    </div>
+
+    <p v-if="result" class="test-hint">
+      Record once, then apply every algorithm to the same sample to compare them. This does not change the settings above.
+    </p>
+
     <template v-if="result">
       <div class="test-metrics">
         <span class="metric">
@@ -89,8 +194,12 @@ async function transcribe(kind: 'raw' | 'clean') {
           <span class="metric-value">{{ qualityLabel(result.quality.snr_db) }}</span>
         </span>
         <span class="metric">
-          <span class="metric-label">SNR</span>
-          <span class="metric-value">{{ formatSnr(result.quality.snr_db) }}</span>
+          <span class="metric-label">SNR input to output</span>
+          <span class="metric-value">{{ snrChange }}</span>
+        </span>
+        <span class="metric">
+          <span class="metric-label">Noise floor</span>
+          <span class="metric-value">{{ formatLevel(result.quality.output_noise_dbfs) }}</span>
         </span>
         <span v-if="result.quality.hum_hz" class="metric">
           <span class="metric-label">Hum</span>
@@ -101,8 +210,12 @@ async function transcribe(kind: 'raw' | 'clean') {
           <span class="metric-value">+{{ result.quality.gain_db.toFixed(1) }} dB</span>
         </span>
         <span class="metric">
-          <span class="metric-label">Mode</span>
-          <span class="metric-value">{{ result.mode }}</span>
+          <span class="metric-label">Denoise</span>
+          <span class="metric-value">{{ appliedAlgorithm }}</span>
+        </span>
+        <span class="metric">
+          <span class="metric-label">Processing</span>
+          <span class="metric-value">{{ formatDuration(result.quality.denoise_ms) }}</span>
         </span>
       </div>
 
@@ -168,6 +281,7 @@ async function transcribe(kind: 'raw' | 'clean') {
 }
 
 .test-hint {
+  margin: 0;
   font-size: 10px;
   color: var(--text-weak);
 }
@@ -177,6 +291,26 @@ async function transcribe(kind: 'raw' | 'clean') {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.test-apply {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.apply-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.apply-field label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-weak);
 }
 
 .btn-small {

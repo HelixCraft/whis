@@ -110,9 +110,7 @@ async fn run_retranscription(app: &AppHandle, state: &AppState) -> Result<String
 
     // Re-apply the cleanup chain with the current mode. The stored file stays
     // raw, so a later re-transcription can use a different mode.
-    let enhance_config = EnhanceConfig {
-        mode: state.with_settings(|s| s.ui.audio_enhance.mode),
-    };
+    let enhance_config = EnhanceConfig::from(state.with_settings(|s| s.ui.audio_enhance));
     let (raw_text, quality) = whis_core::transcribe_samples_enhanced(
         &config.provider,
         &config.api_key,

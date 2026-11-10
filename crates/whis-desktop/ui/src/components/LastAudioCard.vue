@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { UnlistenFn } from '@tauri-apps/api/event'
-import type { AudioQuality, LastAudioInfo } from '../types'
+import type { AudioQuality, DenoiseAlgorithm, LastAudioInfo } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { onMounted, onUnmounted, ref } from 'vue'
@@ -17,6 +17,18 @@ function formatDate(ms: number): string {
   if (!ms)
     return 'unknown'
   return new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+const algorithmLabels: Record<DenoiseAlgorithm, string> = {
+  'subtraction': 'spectral subtraction',
+  'wiener': 'Wiener',
+  'mmse-lsa': 'MMSE-LSA',
+  'rnnoise': 'RNNoise',
+  'deepfilter': 'DeepFilterNet3',
+}
+
+function algorithmLabel(algorithm: DenoiseAlgorithm | null): string {
+  return algorithm ? algorithmLabels[algorithm] : ''
 }
 
 function formatDuration(seconds: number): string {
@@ -118,7 +130,7 @@ onUnmounted(() => {
 
     <div v-if="quality && quality.chunks > 0" class="quality-row">
       <span class="quality-item">
-        SNR <strong>{{ formatSnr(quality.snr_db) }}</strong>
+        SNR <strong>{{ quality.denoised ? `${quality.snr_db.toFixed(1)} to ${quality.output_snr_db.toFixed(1)} dB` : formatSnr(quality.snr_db) }}</strong>
       </span>
       <span v-if="quality.hum_hz" class="quality-item">
         Hum <strong>{{ Math.round(quality.hum_hz) }} Hz</strong>
@@ -127,7 +139,7 @@ onUnmounted(() => {
         Gain <strong>+{{ quality.gain_db.toFixed(1) }} dB</strong>
       </span>
       <span v-if="quality.denoised" class="quality-item">
-        Denoised
+        Denoised <strong>{{ algorithmLabel(quality.denoise_algorithm) }}</strong>
       </span>
       <span v-if="quality.clipping" class="quality-item warning">
         Clipping

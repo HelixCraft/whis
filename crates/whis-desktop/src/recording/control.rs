@@ -50,7 +50,7 @@ pub fn start_recording_sync(app: &AppHandle, state: &AppState) -> Result<(), Str
     let vad_threshold = settings.ui.vad.threshold;
     let device_name = settings.ui.microphone_device.clone();
     let chunk_duration = settings.ui.chunk_duration_secs;
-    let enhance_mode = settings.ui.audio_enhance.mode;
+    let enhance_settings = settings.ui.audio_enhance;
     #[cfg(feature = "local-transcription")]
     let keep_loaded = settings.ui.model_memory.keep_model_loaded;
     #[cfg(feature = "local-transcription")]
@@ -119,7 +119,7 @@ pub fn start_recording_sync(app: &AppHandle, state: &AppState) -> Result<(), Str
             // applied here, only the stateful high-pass and a slow level gain.
             let audio_rx_unbounded = whis_core::audio::enhance_audio_stream(
                 audio_rx_unbounded,
-                whis_core::audio::EnhanceConfig { mode: enhance_mode },
+                whis_core::audio::EnhanceConfig::from(&enhance_settings),
             );
 
             tauri::async_runtime::spawn(async move {
@@ -162,7 +162,7 @@ pub fn start_recording_sync(app: &AppHandle, state: &AppState) -> Result<(), Str
         // stored raw recording is written elsewhere and stays untouched.
         let (chunk_rx, quality) = whis_core::audio::enhance_chunk_stream(
             chunk_rx,
-            whis_core::audio::EnhanceConfig { mode: enhance_mode },
+            whis_core::audio::EnhanceConfig::from(&enhance_settings),
         );
         *state.active_quality.lock().unwrap() = Some(quality);
 

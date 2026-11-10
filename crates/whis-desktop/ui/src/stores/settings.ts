@@ -1,4 +1,4 @@
-import type { AutotypeBackend, AutotypeToolStatus, BackendInfo, CliShortcutMode, EnhanceMode, OutputMethod, PostProcessor, Provider, Settings, ShortcutPathMismatch } from '../types'
+import type { AutotypeBackend, AutotypeToolStatus, BackendInfo, CliShortcutMode, DenoiseAlgorithm, EnhanceMode, OutputMethod, PostProcessor, Provider, Settings, ShortcutPathMismatch } from '../types'
 import { invoke } from '@tauri-apps/api/core'
 import { nextTick, reactive, readonly, watch } from 'vue'
 
@@ -83,6 +83,7 @@ function getDefaultSettings(): Settings {
       microphone_device: null,
       audio_enhance: {
         mode: 'light' as EnhanceMode,
+        algorithm: 'mmse-lsa' as DenoiseAlgorithm,
       },
       chunk_duration_secs: 90,
       output_method: 'clipboard' as OutputMethod,
@@ -222,6 +223,7 @@ async function load() {
       microphone_device: settings.ui.microphone_device,
       audio_enhance: {
         mode: settings.ui.audio_enhance?.mode ?? 'light',
+        algorithm: settings.ui.audio_enhance?.algorithm ?? 'mmse-lsa',
       },
       chunk_duration_secs: Math.max(10, Math.min(300, settings.ui.chunk_duration_secs ?? 90)),
       output_method: settings.ui.output_method ?? 'clipboard',
@@ -454,6 +456,10 @@ function setEnhanceMode(value: EnhanceMode) {
   state.ui.audio_enhance.mode = value
 }
 
+function setDenoiseAlgorithm(value: DenoiseAlgorithm) {
+  state.ui.audio_enhance.algorithm = value
+}
+
 function setBubbleEnabled(value: boolean) {
   state.ui.bubble.enabled = value
 }
@@ -588,6 +594,7 @@ export const settingsStore = {
   setPortalShortcut,
   setMicrophoneDevice,
   setEnhanceMode,
+  setDenoiseAlgorithm,
   setBubbleEnabled,
   setChunkDuration,
   setKeepModelLoaded,
