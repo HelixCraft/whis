@@ -6,8 +6,8 @@ changes, removed code, and build/documentation changes, not just the most recent
 work.
 
 - Upstream baseline: `0e39d9a` (`feat(settings): separate CLI and desktop config storage`)
-- Fork HEAD at the time of writing: `a12f708`
-- Fork commits ahead of upstream: 6
+- Fork HEAD at the time of writing: `0bc9c45`
+- Fork commits ahead of upstream: 8
 
 | Commit | Summary |
 |---|---|
@@ -18,6 +18,8 @@ work.
 | `84a0dde` | Desktop cleanup settings, quality metrics, and test recording |
 | `17027f7` | Fork changes documentation |
 | `a12f708` | Release workflow adapted for the CPU-only fork |
+| `038affe` | Core: five selectable denoise algorithms |
+| `0bc9c45` | Desktop: denoise selection and A/B test card |
 
 ---
 
@@ -324,9 +326,9 @@ changing the stored recording.
 
 `crates/whis-core/src/audio/enhance.rs`
 
-- `EnhanceMode`: `off`, `light` (default), `auto`, `strong`.
+- `EnhanceMode`: `off`, `light` (default), `auto`, `denoise`, `strong`.
 - `AudioEnhanceSettings` is part of `UiSettings` and serializes as
-  `{ "mode": "light" }`.
+  `{ "mode": "light", "algorithm": "mmse-lsa" }`.
 - Always-on light chain (`light`, `auto`, `strong`):
   - DC/rumble high-pass at 60 Hz (Q 0.707).
   - Narrow notches for detected 50/60 Hz mains hum and prominent harmonics.
@@ -335,20 +337,26 @@ changing the stored recording.
   - Upward-only level normalisation towards -20 dBFS speech, capped at +18 dB
     and at a -1 dBFS peak ceiling. Loud input is never attenuated, so a good
     microphone cannot be made worse.
-- Optional spectral denoise (`auto`, `strong`):
-  - Own radix-2 FFT, 512-point window, 8 ms hop, Hann analysis/synthesis,
-    smoothed Wiener gains, minimum-statistics noise estimate.
-  - Gain floor: -8 dB in auto, -14 dB in strong, so speech is never gated to
-    zero.
+- Optional denoise (`auto`, `denoise`, `strong`), see section 11:
+  - `auto` runs the selected algorithm only when the recording is measured as
+    noisy, `denoise` always at balanced strength, `strong` always at strong
+    attenuation.
   - Auto mode triggers only when `3 dB < SNR < 15 dB` and speech is above
     -60 dBFS. A steady clean signal without pauses (held tone, singing) is not
     denoised.
+  - `EnhanceStats` and `AudioQuality` record which algorithm ran
+    (`denoise_algorithm`), how long it took (`denoise_ms`), and the measured
+    noise floor and SNR after processing (`output_noise_dbfs`,
+    `output_snr_db`). The post-processing values are what makes the algorithms
+    comparable: the input values do not change between runs on the same
+    sample.
 - Safety gate: a chunk is skipped only when its peak is below -70 dBFS and its
   RMS below -75 dBFS. That is digital silence or a muted microphone, far below
   any audible speech.
 - `AudioQuality` aggregates peak, RMS, speech, noise, SNR, applied gain, hum,
-  clipping, denoise flag, and gated chunks, weighted by duration.
-  `is_noisy()` drives the UI recommendation.
+  clipping, denoise flag, algorithm, processing time, output noise floor,
+  output SNR, and gated chunks, weighted by duration. `is_noisy()` drives the
+  UI recommendation.
 - Integration helpers:
   - `enhance_owned` / `enhance` for batch buffers.
   - `enhance_chunk_stream` for progressive chunks; aggregates quality and drops
@@ -366,7 +374,7 @@ changing the stored recording.
 
 ### Desktop
 
-- `recording/control.rs` reads `settings.ui.audio_enhance.mode`, wraps the
+- `recording/control.rs` reads `settings.ui.audio_enhance`, wraps the
   progressive chunk stream with `enhance_chunk_stream`, and the realtime audio
   stream with `enhance_audio_stream`.
 - `recording/pipeline.rs` publishes quality through `publish_audio_quality` and
@@ -375,21 +383,29 @@ changing the stored recording.
 - `commands/last_audio.rs`: re-transcription uses
   `transcribe_samples_enhanced` with the current mode, so changing the mode
   changes later re-transcriptions. The stored WAV remains raw.
-- `commands/audio.rs`: `record_audio_test`, `play_audio_test`,
-  `transcribe_audio_test`, `get_last_audio_quality`.
+- `commands/audio.rs`: `record_audio_test`, `process_audio_test`,
+  `play_audio_test`, `transcribe_audio_test`, `get_last_audio_quality`.
   - The test records 6 seconds, VAD off, with the configured microphone.
   - The original is amplified by the same gain as the cleaned version, so the
     comparison is level-matched.
   - When the current mode is `off`, the preview uses `light`.
+  - `process_audio_test` re-runs any mode and algorithm on the stored test
+    sample, so every algorithm can be heard on the exact same recording without
+    recording again. It does not change the saved settings.
   - Nothing is written to the stored last recording.
 - `toggle_recording` is blocked while a test recording owns the microphone.
 
 ### UI
 
-- Settings, "audio cleanup": mode selector plus a test card with play and
-  transcribe for original vs cleaned.
-- `LastAudioCard.vue`: SNR, hum, gain, denoise, clipping, and skipped silent
-  chunks.
+- Settings, "audio cleanup": mode selector, denoise algorithm selector, test
+  card with play and transcribe for original vs cleaned.
+  - The test card also has algorithm and strength selectors plus an
+    "apply to sample" button, which is the fastest way to A/B the denoisers.
+  - It shows the applied algorithm, the denoise processing time, the noise
+    floor after processing, and the SNR before and after, so the algorithms can
+    be compared objectively and not only by ear.
+- `LastAudioCard.vue`: SNR, hum, gain, denoise algorithm, clipping, and skipped
+  silent chunks.
 - `AudioQualityNotice.vue` (rendered in `App.vue`): recommendation to enable
   auto denoise after a noisy recording.
 
@@ -403,7 +419,73 @@ changing the stored recording.
 
 ---
 
-## 11. File map
+## 11. Denoise algorithms
+
+`crates/whis-core/src/audio/denoise/`
+
+The denoiser that shipped with section 10 was a single, deliberately gentle
+spectral gate (8 dB attenuation floor, heavy gain smoothing). It was barely
+audible on purpose, which made the feature look broken. It has been replaced by
+five selectable implementations with a shared, much stronger noise tracker.
+
+### Shared front end (`classical.rs`)
+
+- 512-point Hann STFT at 16 kHz, 8 ms hop, 75 percent overlap,
+  window-squared overlap-add.
+- Noise PSD from a simplified MCRA (minima controlled recursive averaging,
+  Cohen 2001): recursive power smoothing, 3-bin frequency smoothing, minimum
+  tracking over eight 64 ms sub-windows, speech presence probability from the
+  smoothed-to-minimum ratio, and a noise update that slows down while speech is
+  present. The probability also drives the gain smoothing, so onsets stay sharp
+  while noise-only frames are smoothed heavily.
+- Output gains are clamped to `[-18 dB, 0 dB]` in balanced mode and
+  `[-32 dB, 0 dB]` in strong mode, so no bin is ever gated to digital silence.
+
+### Algorithms
+
+| id | Name | Basis | Cost (10 s, release) |
+|---|---|---|---|
+| `subtraction` | Spectral subtraction | Berouti 1979, over-subtraction 2.2 / 4.0, spectral floor | ~15 ms |
+| `wiener` | Wiener filter | Wiener gain with decision-directed a priori SNR (Ephraim-Malah 1984) | ~15 ms |
+| `mmse-lsa` | MMSE-LSA | Ephraim-Malah log-spectral amplitude estimator, `E1` implemented in `f64` | ~30 ms |
+| `rnnoise` | RNNoise | `nnnoiseless`, the pure-Rust port of Xiph's recurrent network | ~120 ms |
+| `deepfilter` | DeepFilterNet3 | `deep-filter-rt`, pure-Rust inference with the embedded model | ~280 ms |
+
+Measured noise reduction on synthetic speech with stationary white noise, at
+about 8 dB input SNR, balanced strength:
+
+| Algorithm | Pause attenuation | Speech level change |
+|---|---|---|
+| Spectral subtraction | -12 dB | -4 dB |
+| Wiener | -16 dB | -7 dB |
+| MMSE-LSA | -14 dB | -6 dB |
+| RNNoise | -10 dB | -6 dB |
+| DeepFilterNet3 | -18 dB | -13 dB |
+
+The speech column is measured on a synthetic harmonic signal, which the neural
+models treat as non-speech, so they attenuate it more than a real voice. The
+numbers are a regression aid, not a quality ranking; `tests/denoise_report.rs`
+regenerates them (`cargo test -p whis-core --test denoise_report --release --
+--ignored --nocapture`).
+
+### Neural models
+
+- Both models are trained at 48 kHz, so `resample.rs` converts 16 kHz up and
+  back with a polyphase Kaiser-windowed sinc (241 taps, cutoff 7.9 kHz,
+  no algorithmic delay, about 8 M multiply-adds per second of audio).
+- RNNoise gets the signal in 16-bit PCM scale and one leading silent frame so
+  the recurrent state settles; balanced mode mixes 20 percent of the dry signal
+  back to keep it from sounding over-processed.
+- DeepFilterNet3 gets a pre-gain to 0.1 RMS (its normalisation is unreliable on
+  very quiet input) and an attenuation limit of 20 dB balanced / 40 dB strong,
+  which mixes the noisy spectrum back in instead of hard-gating.
+- The DeepFilter model is loaded per call (about 50 ms). Caching it would need a
+  reset path to avoid bleeding state between recordings, which is not worth it
+  at that cost.
+
+---
+
+## 12. File map
 
 | Area | Files |
 |---|---|
@@ -422,7 +504,7 @@ changing the stored recording.
 
 ---
 
-## 12. Compatibility and limitations
+## 13. Compatibility and limitations
 
 - Existing settings are migrated automatically; the old per-engine model paths
   map to catalog ids. Unknown custom paths keep working as `custom_path`.
