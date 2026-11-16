@@ -280,6 +280,10 @@ used by both the progressive and batch paths.
 - The AppImage used during development is built inside a Docker image
   (`whis-build:appimage`); that workflow is local tooling, not a committed
   repository change.
+- The AppImage no longer prints the "install Whis as an app for Wayland
+  shortcuts" hint when it is started from a terminal. The AppImage stays fully
+  portable; `--install` / `--uninstall` are still available for users who want
+  the desktop entry for the portal shortcut.
 - The `__TAURI_BUNDLE_TYPE variable not found` message during AppImage bundling
   is harmless updater metadata noise.
 
@@ -328,7 +332,9 @@ changing the stored recording.
 
 - `EnhanceMode`: `off`, `light` (default), `auto`, `denoise`, `strong`.
 - `AudioEnhanceSettings` is part of `UiSettings` and serializes as
-  `{ "mode": "light", "algorithm": "mmse-lsa" }`.
+  `{ "mode": "light", "algorithm": "mmse-lsa", "strength": 0.5 }`. `strength`
+  is a continuous `0.0..=1.0` value, older settings without it fall back to
+  `0.5` through `#[serde(default)]`.
 - Always-on light chain (`light`, `auto`, `strong`):
   - DC/rumble high-pass at 60 Hz (Q 0.707).
   - Narrow notches for detected 50/60 Hz mains hum and prominent harmonics.
@@ -339,8 +345,9 @@ changing the stored recording.
     microphone cannot be made worse.
 - Optional denoise (`auto`, `denoise`, `strong`), see section 11:
   - `auto` runs the selected algorithm only when the recording is measured as
-    noisy, `denoise` always at balanced strength, `strong` always at strong
-    attenuation.
+    noisy, `denoise` always. Both use the configured `strength`. The legacy
+    `strong` mode is still accepted on the backend and forces `strength = 1.0`;
+    the UI migrates it to `denoise` with strength `1.0` when settings load.
   - Auto mode triggers only when `3 dB < SNR < 15 dB` and speech is above
     -60 dBFS. A steady clean signal without pauses (held tone, singing) is not
     denoised.
@@ -383,27 +390,38 @@ changing the stored recording.
 - `commands/last_audio.rs`: re-transcription uses
   `transcribe_samples_enhanced` with the current mode, so changing the mode
   changes later re-transcriptions. The stored WAV remains raw.
-- `commands/audio.rs`: `record_audio_test`, `process_audio_test`,
-  `play_audio_test`, `transcribe_audio_test`, `get_last_audio_quality`.
-  - The test records 6 seconds, VAD off, with the configured microphone.
+- `commands/audio.rs`: `start_audio_test_recording`,
+  `stop_audio_test_recording`, `cancel_audio_test_recording`,
+  `process_audio_test`, `transcribe_audio_test`, `get_last_audio_quality`.
+  - The test recording is explicit: the UI starts it and the user stops it,
+    with VAD off and the configured microphone. It is not fixed to 6 seconds.
+  - Both the original and the cleaned sample are returned as base64 WAV data
+    URLs, so playback happens inside the app window instead of opening an
+    external player.
   - The original is amplified by the same gain as the cleaned version, so the
     comparison is level-matched.
-  - When the current mode is `off`, the preview uses `light`.
-  - `process_audio_test` re-runs any mode and algorithm on the stored test
-    sample, so every algorithm can be heard on the exact same recording without
-    recording again. It does not change the saved settings.
+  - `process_audio_test(mode, algorithm, strength)` re-runs any configuration
+    on the stored test sample, so every algorithm and strength can be heard on
+    the exact same recording without recording again. It does not change the
+    saved settings. The test card always sends `mode: "denoise"` so a
+    comparison always applies denoising even when the saved mode is `off`.
   - Nothing is written to the stored last recording.
 - `toggle_recording` is blocked while a test recording owns the microphone.
 
 ### UI
 
-- Settings, "audio cleanup": mode selector, denoise algorithm selector, test
-  card with play and transcribe for original vs cleaned.
-  - The test card also has algorithm and strength selectors plus an
+- Settings, "audio cleanup": mode selector, denoise algorithm selector, and a
+  continuous strength slider (`0-100 %`) that applies to whichever algorithm
+  is selected.
+- Test card: a single Record/Stop button with a live timer, plus Play/Stop for
+  the original and the cleaned sample. Stop resets playback to the beginning,
+  and starting one side stops the other, so the two are easy to compare.
+  - The card also has algorithm and strength selectors plus an
     "apply to sample" button, which is the fastest way to A/B the denoisers.
-  - It shows the applied algorithm, the denoise processing time, the noise
-    floor after processing, and the SNR before and after, so the algorithms can
-    be compared objectively and not only by ear.
+    The button uses the currently selected algorithm and strength.
+  - It shows the applied algorithm and strength, the denoise processing time,
+    the noise floor after processing, and the SNR before and after, so the
+    algorithms can be compared objectively and not only by ear.
 - `LastAudioCard.vue`: SNR, hum, gain, denoise algorithm, clipping, and skipped
   silent chunks.
 - `AudioQualityNotice.vue` (rendered in `App.vue`): recommendation to enable
@@ -438,21 +456,39 @@ five selectable implementations with a shared, much stronger noise tracker.
   smoothed-to-minimum ratio, and a noise update that slows down while speech is
   present. The probability also drives the gain smoothing, so onsets stay sharp
   while noise-only frames are smoothed heavily.
-- Output gains are clamped to `[-18 dB, 0 dB]` in balanced mode and
-  `[-32 dB, 0 dB]` in strong mode, so no bin is ever gated to digital silence.
+- Output gains are clamped to `[-(2 + 30 * strength) dB, 0 dB]`, so no bin is
+  ever gated to digital silence and the slider directly controls how deep the
+  attenuation may go.
+
+### Strength
+
+`denoise(samples, algorithm, strength: f32)` takes the same continuous
+`strength` for every algorithm and maps it to that algorithm's own parameters:
+
+| Algorithm | strength 0.0 | strength 1.0 |
+|---|---|---|
+| Spectral subtraction | over-subtraction 1.2, floor 0.12, -2 dB | over-subtraction 4.2, floor 0.002, -32 dB |
+| Wiener | DD alpha 0.99, -2 dB | DD alpha 0.93, -32 dB |
+| MMSE-LSA | DD alpha 0.99, -2 dB | DD alpha 0.93, -32 dB |
+| RNNoise | dry signal (wet weight 0) | model output (wet weight 1) |
+| DeepFilterNet3 | attenuation limit 0 dB | attenuation limit 60 dB |
+
+A strength of `0` (or below `0.001`) skips the denoiser entirely and reports
+`denoised: false`, so the chain cannot accidentally alter audio at the low end
+of the slider.
 
 ### Algorithms
 
 | id | Name | Basis | Cost (10 s, release) |
 |---|---|---|---|
-| `subtraction` | Spectral subtraction | Berouti 1979, over-subtraction 2.2 / 4.0, spectral floor | ~15 ms |
+| `subtraction` | Spectral subtraction | Berouti 1979, interpolated over-subtraction and spectral floor | ~15 ms |
 | `wiener` | Wiener filter | Wiener gain with decision-directed a priori SNR (Ephraim-Malah 1984) | ~15 ms |
 | `mmse-lsa` | MMSE-LSA | Ephraim-Malah log-spectral amplitude estimator, `E1` implemented in `f64` | ~30 ms |
 | `rnnoise` | RNNoise | `nnnoiseless`, the pure-Rust port of Xiph's recurrent network | ~120 ms |
 | `deepfilter` | DeepFilterNet3 | `deep-filter-rt`, pure-Rust inference with the embedded model | ~280 ms |
 
 Measured noise reduction on synthetic speech with stationary white noise, at
-about 8 dB input SNR, balanced strength:
+about 8 dB input SNR, strength 0.5:
 
 | Algorithm | Pause attenuation | Speech level change |
 |---|---|---|
@@ -474,18 +510,46 @@ regenerates them (`cargo test -p whis-core --test denoise_report --release --
   back with a polyphase Kaiser-windowed sinc (241 taps, cutoff 7.9 kHz,
   no algorithmic delay, about 8 M multiply-adds per second of audio).
 - RNNoise gets the signal in 16-bit PCM scale and one leading silent frame so
-  the recurrent state settles; balanced mode mixes 20 percent of the dry signal
-  back to keep it from sounding over-processed.
+  the recurrent state settles; `strength` is the dry/wet weight, so the same
+  slider position means the same amount of dry signal mixed back in.
 - DeepFilterNet3 gets a pre-gain to 0.1 RMS (its normalisation is unreliable on
-  very quiet input) and an attenuation limit of 20 dB balanced / 40 dB strong,
-  which mixes the noisy spectrum back in instead of hard-gating.
+  very quiet input) and an attenuation limit of `60 * strength` dB, which mixes
+  the noisy spectrum back in instead of hard-gating.
 - The DeepFilter model is loaded per call (about 50 ms). Caching it would need a
   reset path to avoid bleeding state between recordings, which is not worth it
   at that cost.
 
 ---
 
-## 12. File map
+## 12. Long recordings
+
+A recording is split into intervals during capture so transcription can start
+before the user stops talking. Everything around those boundaries is built so
+that no audio and no text can be lost:
+
+- Streaming capture uses an unbounded channel. The audio callback never blocks
+  and never drops a block. The previous bounded channel with `try_send` lost
+  blocks whenever the consumer fell behind (denoising, transcription, a busy
+  runtime), which truncated long recordings.
+- The chunker flushes its buffer after the last full interval on every stream
+  close (`consume_stream`), so the tail of a recording always becomes its own
+  chunk. The regression test `final_chunk_contains_audio_after_last_boundary`
+  guards this.
+- Chunk cleanup runs in `spawn_blocking`, so denoising a 90-second chunk cannot
+  starve the audio pipeline or the async runtime.
+- A failing chunk no longer aborts the whole recording. The progressive
+  transcription functions log the error, keep transcribing the remaining
+  chunks, and only fail when every chunk failed.
+- If the progressive result is missing or empty, the desktop pipeline
+  transcribes the complete stored recording once more
+  (`do_progressive_transcription` -> `retranscribe_full`).
+- `last_audio.wav` is written from the recorder's own buffer before
+  transcription starts, so it always contains the whole recording instead of a
+  single interval.
+
+---
+
+## 13. File map
 
 | Area | Files |
 |---|---|
@@ -504,7 +568,7 @@ regenerates them (`cargo test -p whis-core --test denoise_report --release --
 
 ---
 
-## 13. Compatibility and limitations
+## 14. Compatibility and limitations
 
 - Existing settings are migrated automatically; the old per-engine model paths
   map to catalog ids. Unknown custom paths keep working as `custom_path`.

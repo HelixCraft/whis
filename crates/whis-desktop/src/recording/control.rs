@@ -68,19 +68,9 @@ pub fn start_recording_sync(app: &AppHandle, state: &AppState) -> Result<(), Str
     recorder.set_vad(vad_enabled, vad_threshold);
 
     // Start streaming recording
-    let mut audio_rx_bounded = recorder
+    let audio_rx_unbounded = recorder
         .start_recording_streaming_with_device(device_name.as_deref())
         .map_err(|e| e.to_string())?;
-
-    // Create unbounded channel adapter (used by both realtime and chunked paths)
-    let (audio_tx_unbounded, audio_rx_unbounded) = mpsc::unbounded_channel();
-    tauri::async_runtime::spawn(async move {
-        while let Some(samples) = audio_rx_bounded.recv().await {
-            if audio_tx_unbounded.send(samples).is_err() {
-                break;
-            }
-        }
-    });
 
     // Create oneshot channel for transcription result
     let (result_tx, result_rx) = oneshot::channel();

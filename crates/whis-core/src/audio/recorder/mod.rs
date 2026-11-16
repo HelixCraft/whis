@@ -17,8 +17,13 @@ use crate::resample::{FrameResampler, WHISPER_SAMPLE_RATE};
 
 use processor::SampleProcessor;
 
-/// Sender type for streaming audio samples during recording
-pub type AudioStreamSender = tokio::sync::mpsc::Sender<Vec<f32>>;
+/// Sender type for streaming audio samples during recording.
+///
+/// The channel is unbounded on purpose: the audio callback must never block and
+/// must never drop a block. A bounded channel with `try_send` silently loses
+/// audio whenever the consumer falls behind (denoising, transcription, a busy
+/// runtime), which truncates both the transcript and the chunk tail.
+pub type AudioStreamSender = tokio::sync::mpsc::UnboundedSender<Vec<f32>>;
 
 /// Audio recorder with real-time resampling to 16kHz mono.
 ///
@@ -237,7 +242,9 @@ impl AudioRecorder {
     /// as they are recorded. The receiver should be consumed in a separate async task.
     ///
     /// Used by streaming transcription providers like OpenAI Realtime API.
-    pub fn start_recording_streaming(&mut self) -> Result<tokio::sync::mpsc::Receiver<Vec<f32>>> {
+    pub fn start_recording_streaming(
+        &mut self,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>> {
         self.start_recording_streaming_with_device(None)
     }
 
@@ -245,9 +252,9 @@ impl AudioRecorder {
     pub fn start_recording_streaming_with_device(
         &mut self,
         device_name: Option<&str>,
-    ) -> Result<tokio::sync::mpsc::Receiver<Vec<f32>>> {
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Vec<f32>>> {
         // Create channel for streaming samples
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.stream_tx = Some(Arc::new(tx));
 
         // Start recording normally

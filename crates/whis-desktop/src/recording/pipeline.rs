@@ -17,7 +17,7 @@ use whis_core::history::{self, HistoryEntry, HistorySource};
 use whis_core::{
     AutotypeBackend, ClipboardMethod, DEFAULT_POST_PROCESSING_PROMPT, OutputMethod,
     PostProcessConfig, PostProcessor, TranscriptionProvider, autotype_text, copy_to_clipboard,
-    ollama, post_process, warn,
+    info, ollama, post_process, warn,
 };
 #[cfg(feature = "local-transcription")]
 use whis_core::{local_cpp_unload_model, unload_parakeet};
@@ -80,6 +80,7 @@ pub async fn stop_and_transcribe(app: &AppHandle) -> Result<(), String> {
     };
 
     let duration_secs = samples.len() as f32 / 16_000.0;
+    info!("Recording captured {duration_secs:.1}s of audio");
     persist_last_audio(app, &state, &samples);
 
     // Update state to transcribing
@@ -87,7 +88,7 @@ pub async fn stop_and_transcribe(app: &AppHandle) -> Result<(), String> {
     println!("Transcribing...");
 
     // Run transcription with guaranteed state cleanup on any error
-    let result = do_progressive_transcription(app, &state, duration_secs).await;
+    let result = do_progressive_transcription(app, &state, duration_secs, &samples).await;
 
     // Always reset state, regardless of success or failure
     state.set_state(RecordingState::Idle);
@@ -427,11 +428,16 @@ fn report_audio_quality(app: &AppHandle, state: &AppState) {
     publish_audio_quality(app, state, quality);
 }
 
-/// Progressive transcription logic - receives result from background task
+/// Transcription logic - receives the result from the background task.
+///
+/// If the progressive result failed or is empty, the complete recording is
+/// transcribed once more as a single pass. The audio was captured in full, so a
+/// failure inside the chunk pipeline must never cost the user their text.
 async fn do_progressive_transcription(
     app: &AppHandle,
     state: &AppState,
     duration_secs: f32,
+    samples: &[f32],
 ) -> Result<(), String> {
     // Receive transcription result from background task
     let rx = {
@@ -450,7 +456,19 @@ async fn do_progressive_transcription(
     // and the user can still act on a noisy-recording recommendation.
     report_audio_quality(app, state);
 
-    let raw_text = transcription.map_err(|e| format!("Transcription failed: {e}"))?;
+    let raw_text = match transcription {
+        Ok(text) if !text.trim().is_empty() => text,
+        Ok(_) => {
+            warn!("Progressive transcription returned no text, retrying the full recording");
+            retranscribe_full(app, state, samples).await?
+        }
+        Err(e) => {
+            warn!("Progressive transcription failed ({e}), retrying the full recording");
+            retranscribe_full(app, state, samples)
+                .await
+                .map_err(|retry| format!("Transcription failed: {e}; retry failed: {retry}"))?
+        }
+    };
 
     let (final_text, post_processed) = post_process_text(app, state, &raw_text).await;
 
@@ -465,6 +483,38 @@ async fn do_progressive_transcription(
         None,
     )
     .await
+}
+
+/// Transcribe the complete recording in one pass, bypassing the chunk stream.
+async fn retranscribe_full(
+    app: &AppHandle,
+    state: &AppState,
+    samples: &[f32],
+) -> Result<String, String> {
+    let config = {
+        let cached = state.transcription_config.lock().unwrap().clone();
+        match cached {
+            Some(config) => config,
+            None => super::load_transcription_config(state)?,
+        }
+    };
+
+    let enhance_config =
+        whis_core::audio::EnhanceConfig::from(state.with_settings(|s| s.ui.audio_enhance));
+
+    let (text, quality) = whis_core::transcribe_samples_enhanced(
+        &config.provider,
+        &config.api_key,
+        config.language.as_deref(),
+        samples.to_vec(),
+        &enhance_config,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    publish_audio_quality(app, state, quality);
+
+    Ok(text)
 }
 
 /// Schedule automatic model unload after idle timeout

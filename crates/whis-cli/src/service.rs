@@ -295,20 +295,8 @@ impl Service {
 
         // Start streaming recording with configured device
         let device_name = settings.ui.microphone_device.clone();
-        let mut audio_rx_bounded =
+        let audio_rx_unbounded =
             recorder.start_recording_streaming_with_device(device_name.as_deref())?;
-
-        // Create unbounded channel for chunker (adapter pattern)
-        let (audio_tx_unbounded, audio_rx_unbounded) = mpsc::unbounded_channel();
-
-        // Spawn adapter task to forward from bounded to unbounded channel
-        tokio::spawn(async move {
-            while let Some(samples) = audio_rx_bounded.recv().await {
-                if audio_tx_unbounded.send(samples).is_err() {
-                    break; // Receiver dropped
-                }
-            }
-        });
 
         // Create channels for progressive chunking
         let (chunk_tx, chunk_rx) = mpsc::unbounded_channel();

@@ -150,6 +150,7 @@ pub async fn progressive_transcribe_cloud(
     let provider_impl = registry().get_by_kind(provider)?;
     let mut transcriptions = Vec::new();
     let mut chunk_count = 0;
+    let mut failures: Vec<String> = Vec::new();
 
     // Process chunks sequentially as they arrive (true progressive)
     while let Some(chunk) = chunk_rx.recv().await {
@@ -158,8 +159,14 @@ pub async fn progressive_transcribe_cloud(
         let has_leading_overlap = chunk.has_leading_overlap;
 
         // Convert samples to MP3
-        let mp3_data =
-            samples_to_mp3(&chunk.samples).context("Failed to encode audio chunk to MP3")?;
+        let mp3_data = match samples_to_mp3(&chunk.samples) {
+            Ok(data) => data,
+            Err(e) => {
+                crate::warn!("Failed to encode chunk {chunk_index} to MP3: {e}");
+                failures.push(format!("chunk {chunk_index}: {e}"));
+                continue;
+            }
+        };
 
         let request = TranscriptionRequest {
             audio_data: mp3_data,
@@ -171,8 +178,17 @@ pub async fn progressive_transcribe_cloud(
 
         let result = provider_impl
             .transcribe_async(client, api_key, request)
-            .await
-            .with_context(|| format!("Failed to transcribe chunk {chunk_index}"))?;
+            .await;
+
+        // One failing chunk must not discard the rest of a long recording.
+        let result = match result {
+            Ok(result) => result,
+            Err(e) => {
+                crate::warn!("Failed to transcribe chunk {chunk_index}: {e}");
+                failures.push(format!("chunk {chunk_index}: {e}"));
+                continue;
+            }
+        };
 
         transcriptions.push(ChunkTranscription {
             index: chunk_index,
@@ -187,6 +203,12 @@ pub async fn progressive_transcribe_cloud(
         if let Some(ref callback) = partial_callback {
             callback(&merge_transcriptions(&transcriptions));
         }
+    }
+
+    if transcriptions.is_empty()
+        && let Some(first) = failures.first()
+    {
+        anyhow::bail!("Failed to transcribe audio: {first}");
     }
 
     // Results are already in correct order (sequential processing, no sorting needed)
@@ -219,6 +241,7 @@ pub async fn progressive_transcribe_local(
     let language = language.map(str::to_string);
     let mut transcriptions = Vec::new();
     let mut chunk_count = 0;
+    let mut failures: Vec<String> = Vec::new();
 
     // Process chunks sequentially as they arrive (true progressive)
     while let Some(chunk) = chunk_rx.recv().await {
@@ -233,9 +256,23 @@ pub async fn progressive_transcribe_local(
         let result = tokio::task::spawn_blocking(move || {
             crate::provider::transcribe_local(&model_path_owned, samples, language.as_deref())
         })
-        .await
-        .context("Transcription task panicked")?
-        .context("Transcription failed")?;
+        .await;
+
+        // One failing chunk must not discard the rest of a long recording; the
+        // audio after it is still there and still has to be transcribed.
+        let result = match result {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                crate::warn!("Failed to transcribe chunk {chunk_index}: {e}");
+                failures.push(format!("chunk {chunk_index}: {e}"));
+                continue;
+            }
+            Err(e) => {
+                crate::warn!("Transcription task for chunk {chunk_index} panicked: {e}");
+                failures.push(format!("chunk {chunk_index}: {e}"));
+                continue;
+            }
+        };
 
         transcriptions.push(ChunkTranscription {
             index: chunk_index,
@@ -250,6 +287,12 @@ pub async fn progressive_transcribe_local(
         if let Some(ref callback) = partial_callback {
             callback(&merge_transcriptions(&transcriptions));
         }
+    }
+
+    if transcriptions.is_empty()
+        && let Some(first) = failures.first()
+    {
+        anyhow::bail!("Failed to transcribe audio: {first}");
     }
 
     // Results are already in correct order (sequential processing, no sorting needed)

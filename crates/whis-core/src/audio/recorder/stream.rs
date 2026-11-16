@@ -79,10 +79,10 @@ where
                     .unwrap()
                     .extend_from_slice(&processed_samples);
 
-                // Stream samples if channel is configured (for real-time transcription)
+                // Stream samples if channel is configured (for real-time transcription).
+                // Unbounded, so this never blocks the audio callback and never drops audio.
                 if let Some(ref tx) = stream_tx {
-                    // Use try_send to avoid blocking the audio thread
-                    let _ = tx.try_send(processed_samples);
+                    let _ = tx.send(processed_samples);
                 }
             }
         },
