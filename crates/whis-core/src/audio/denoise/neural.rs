@@ -10,7 +10,6 @@
 //! Both models are trained on 48 kHz audio, so the 16 kHz input is upsampled
 //! and the result is downsampled back.
 
-use super::DenoiseStrength;
 use super::resample;
 use ndarray::Array2;
 
@@ -34,17 +33,16 @@ fn blend(dry: &[f32], wet: &[f32], wet_weight: f32) -> Vec<f32> {
 }
 
 /// Denoise with RNNoise.
-pub(super) fn rnnoise(samples: &mut [f32], strength: DenoiseStrength) -> bool {
+pub(super) fn rnnoise(samples: &mut [f32], strength: f32) -> bool {
     use nnnoiseless::DenoiseState;
 
     if samples.len() < FRAME {
         return false;
     }
 
-    let wet_weight = match strength {
-        DenoiseStrength::Balanced => 0.8,
-        DenoiseStrength::Strong => 1.0,
-    };
+    // Direct dry/wet control: the model always runs fully, the slider decides
+    // how much of its output replaces the recording.
+    let wet_weight = strength.clamp(0.0, 1.0);
 
     let upsampled = resample::upsample(samples);
     let mut state = DenoiseState::new();
@@ -77,7 +75,7 @@ pub(super) fn rnnoise(samples: &mut [f32], strength: DenoiseStrength) -> bool {
 }
 
 /// Denoise with DeepFilterNet3.
-pub(super) fn deepfilter(samples: &mut [f32], strength: DenoiseStrength) -> bool {
+pub(super) fn deepfilter(samples: &mut [f32], strength: f32) -> bool {
     use deep_filter_rt::tract::DfTract;
 
     if samples.len() < FRAME {
@@ -87,10 +85,9 @@ pub(super) fn deepfilter(samples: &mut [f32], strength: DenoiseStrength) -> bool
     let mut model = DfTract::default();
     // The model already mixes the noisy spectrum back in, which is a cleaner
     // way to cap the attenuation than blending in the time domain.
-    model.set_atten_lim(match strength {
-        DenoiseStrength::Balanced => 20.0,
-        DenoiseStrength::Strong => 40.0,
-    });
+    // DeepFilterNet caps how far a bin may be attenuated; 60 dB at full
+    // strength is effectively unlimited, the slider scales it down to 0.
+    model.set_atten_lim(60.0 * strength.clamp(0.0, 1.0));
 
     let hop = model.hop_size;
     let delay = model.delay();
@@ -150,7 +147,7 @@ mod tests {
     fn rnnoise_reduces_noise() {
         let mut samples = white_noise(16000, 0.05);
         let before = rms(&samples[4000..]);
-        assert!(rnnoise(&mut samples, DenoiseStrength::Strong));
+        assert!(rnnoise(&mut samples, 1.0));
         let after = rms(&samples[4000..]);
         assert!(after < before * 0.5, "{before} -> {after}");
         assert_eq!(samples.len(), 16000);
@@ -160,7 +157,7 @@ mod tests {
     fn deepfilter_reduces_noise() {
         let mut samples = white_noise(16000, 0.05);
         let before = rms(&samples[4000..]);
-        assert!(deepfilter(&mut samples, DenoiseStrength::Balanced));
+        assert!(deepfilter(&mut samples, 0.7));
         let after = rms(&samples[4000..]);
         assert!(after < before * 0.5, "{before} -> {after}");
         assert_eq!(samples.len(), 16000);

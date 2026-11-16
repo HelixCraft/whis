@@ -1,32 +1,34 @@
 <script setup lang="ts">
-import type { AudioTestResult, DenoiseAlgorithm, SelectOption } from '../../types'
+import type { AudioTestResult, DenoiseAlgorithm } from '../../types'
 import { invoke } from '@tauri-apps/api/core'
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
+import AppSelect from '../AppSelect.vue'
+import AppSlider from '../AppSlider.vue'
 
 const recording = ref(false)
+const recordingSeconds = ref(0)
 const processing = ref(false)
 const transcribing = ref<'raw' | 'clean' | null>(null)
 const result = ref<AudioTestResult | null>(null)
 const rawText = ref<string | null>(null)
 const cleanText = ref<string | null>(null)
 const error = ref<string | null>(null)
+const playing = ref<'raw' | 'clean' | null>(null)
 
-// Settings used for re-processing a stored sample. Both start from whatever the
-// recording used, so the first comparison matches the current configuration.
+// Comparison controls, independent of the saved settings.
 const algorithm = ref<DenoiseAlgorithm>('mmse-lsa')
-const strength = ref<'denoise' | 'strong'>('denoise')
+const strengthPercent = ref(50)
 
-const algorithmOptions: SelectOption[] = [
+const rawPlayer = ref<HTMLAudioElement | null>(null)
+const cleanPlayer = ref<HTMLAudioElement | null>(null)
+let timer: ReturnType<typeof setInterval> | null = null
+
+const algorithmOptions = [
   { value: 'subtraction', label: 'Spectral subtraction' },
   { value: 'wiener', label: 'Wiener filter' },
   { value: 'mmse-lsa', label: 'MMSE-LSA' },
   { value: 'rnnoise', label: 'RNNoise' },
   { value: 'deepfilter', label: 'DeepFilterNet3' },
-]
-
-const strengthOptions: SelectOption[] = [
-  { value: 'denoise', label: 'Balanced' },
-  { value: 'strong', label: 'Strong' },
 ]
 
 function formatSnr(value: number): string {
@@ -37,15 +39,13 @@ function formatLevel(value: number): string {
   return Number.isFinite(value) ? `${value.toFixed(1)} dBFS` : 'n/a'
 }
 
-const snrChange = computed(() => {
-  if (!result.value)
-    return ''
-  const input = result.value.quality.snr_db
-  const output = result.value.quality.output_snr_db
-  if (!result.value.quality.denoised)
-    return formatSnr(input)
-  return `${input.toFixed(1)} to ${output.toFixed(1)} dB`
-})
+function formatDuration(milliseconds: number): string {
+  if (milliseconds <= 0)
+    return 'none'
+  return milliseconds >= 1000
+    ? `${(milliseconds / 1000).toFixed(2)} s`
+    : `${milliseconds.toFixed(0)} ms`
+}
 
 function qualityLabel(snr: number): string {
   if (snr >= 25)
@@ -57,13 +57,14 @@ function qualityLabel(snr: number): string {
   return 'Very noisy'
 }
 
-function formatDuration(milliseconds: number): string {
-  if (milliseconds <= 0)
-    return 'none'
-  return milliseconds >= 1000
-    ? `${(milliseconds / 1000).toFixed(2)} s`
-    : `${milliseconds.toFixed(0)} ms`
-}
+const snrChange = computed(() => {
+  if (!result.value)
+    return ''
+  const input = result.value.quality.snr_db
+  if (!result.value.quality.denoised)
+    return formatSnr(input)
+  return `${input.toFixed(1)} to ${result.value.quality.output_snr_db.toFixed(1)} dB`
+})
 
 const appliedAlgorithm = computed(() => {
   const applied = result.value?.quality.denoise_algorithm
@@ -72,44 +73,69 @@ const appliedAlgorithm = computed(() => {
   return algorithmOptions.find(option => option.value === applied)?.label ?? applied
 })
 
-function handleAlgorithmChange(value: string | null) {
-  if (value)
-    algorithm.value = value as DenoiseAlgorithm
+function stopTimer() {
+  if (timer !== null) {
+    clearInterval(timer)
+    timer = null
+  }
 }
 
-function handleStrengthChange(value: string | null) {
-  if (value)
-    strength.value = value as 'denoise' | 'strong'
+function stopPlayback() {
+  for (const player of [rawPlayer.value, cleanPlayer.value]) {
+    if (player) {
+      player.pause()
+      player.currentTime = 0
+    }
+  }
+  playing.value = null
 }
 
-async function record() {
-  recording.value = true
+function applyResult(recorded: AudioTestResult) {
+  stopPlayback()
+  result.value = recorded
+  algorithm.value = recorded.algorithm
+  strengthPercent.value = Math.round(recorded.strength * 100)
+  rawText.value = null
+  cleanText.value = null
+}
+
+async function startRecording() {
   error.value = null
   rawText.value = null
   cleanText.value = null
   try {
-    const recorded = await invoke<AudioTestResult>('record_audio_test')
-    result.value = recorded
-    algorithm.value = recorded.algorithm
-    strength.value = recorded.mode === 'strong' ? 'strong' : 'denoise'
+    await invoke('start_audio_test_recording')
+    recording.value = true
+    recordingSeconds.value = 0
+    timer = setInterval(() => {
+      recordingSeconds.value += 1
+    }, 1000)
   }
   catch (e) {
     error.value = String(e)
   }
-  finally {
-    recording.value = false
+}
+
+async function stopRecording() {
+  stopTimer()
+  recording.value = false
+  try {
+    applyResult(await invoke<AudioTestResult>('stop_audio_test_recording'))
+  }
+  catch (e) {
+    error.value = String(e)
   }
 }
 
 async function reprocess() {
   processing.value = true
   error.value = null
-  cleanText.value = null
   try {
-    result.value = await invoke<AudioTestResult>('process_audio_test', {
-      mode: strength.value,
+    applyResult(await invoke<AudioTestResult>('process_audio_test', {
+      mode: 'denoise',
       algorithm: algorithm.value,
-    })
+      strength: strengthPercent.value / 100,
+    }))
   }
   catch (e) {
     error.value = String(e)
@@ -119,14 +145,29 @@ async function reprocess() {
   }
 }
 
-async function play(kind: 'raw' | 'clean') {
-  error.value = null
-  try {
-    await invoke('play_audio_test', { kind })
+function togglePlay(kind: 'raw' | 'clean') {
+  const player = kind === 'raw' ? rawPlayer.value : cleanPlayer.value
+  const other = kind === 'raw' ? cleanPlayer.value : rawPlayer.value
+  if (!player)
+    return
+
+  if (!player.paused) {
+    stopPlayback()
+    return
   }
-  catch (e) {
-    error.value = String(e)
+
+  if (other) {
+    other.pause()
+    other.currentTime = 0
   }
+  player.currentTime = 0
+  player.play()
+    .then(() => {
+      playing.value = kind
+    })
+    .catch((e) => {
+      error.value = String(e)
+    })
 }
 
 async function transcribe(kind: 'raw' | 'clean') {
@@ -146,46 +187,63 @@ async function transcribe(kind: 'raw' | 'clean') {
     transcribing.value = null
   }
 }
+
+onBeforeUnmount(() => {
+  stopTimer()
+  stopPlayback()
+  if (recording.value)
+    void invoke('cancel_audio_test_recording')
+})
 </script>
 
 <template>
   <div class="audio-test-card">
     <div class="test-header">
       <span class="test-title">Test your microphone</span>
-      <span class="test-hint">Records 6 seconds and compares the original with the cleaned audio at the same level.</span>
+      <span class="test-hint">Record a sample, then compare the original with the cleaned audio at the same level.</span>
     </div>
 
     <div class="test-actions">
-      <button class="btn btn-secondary btn-small" :disabled="recording" @click="record">
-        {{ recording ? 'Recording...' : 'Record test' }}
+      <button
+        class="btn btn-secondary btn-small"
+        :class="{ 'btn-recording': recording }"
+        @click="recording ? stopRecording() : startRecording()"
+      >
+        {{ recording ? `Stop (${recordingSeconds} s)` : 'Record' }}
       </button>
     </div>
 
-    <div v-if="result" class="test-apply">
-      <div class="apply-field">
-        <label>Algorithm</label>
-        <AppSelect
-          :model-value="algorithm"
-          :options="algorithmOptions"
-          @update:model-value="handleAlgorithmChange"
-        />
+    <template v-if="result">
+      <div class="test-apply">
+        <div class="apply-field">
+          <label>Algorithm</label>
+          <AppSelect
+            :model-value="algorithm"
+            :options="algorithmOptions"
+            @update:model-value="value => value && (algorithm = value as DenoiseAlgorithm)"
+          />
+        </div>
+        <div class="apply-field apply-strength">
+          <label>Strength</label>
+          <AppSlider
+            :model-value="strengthPercent"
+            :min="0"
+            :max="100"
+            :step="5"
+            unit="%"
+            aria-label="Denoise strength for the test sample"
+            @update:model-value="value => (strengthPercent = value)"
+          />
+        </div>
+        <button class="btn btn-secondary btn-small" :disabled="processing || recording" @click="reprocess">
+          {{ processing ? 'Processing...' : 'Apply to sample' }}
+        </button>
       </div>
-      <div class="apply-field">
-        <label>Strength</label>
-        <AppSelect
-          :model-value="strength"
-          :options="strengthOptions"
-          @update:model-value="handleStrengthChange"
-        />
-      </div>
-      <button class="btn btn-secondary btn-small" :disabled="processing" @click="reprocess">
-        {{ processing ? 'Processing...' : 'Apply to sample' }}
-      </button>
-    </div>
 
-    <p v-if="result" class="test-hint">
-      Record once, then apply every algorithm to the same sample to compare them. This does not change the settings above.
-    </p>
+      <p class="test-hint">
+        Record once, then apply every algorithm and strength to the same sample. This does not change the settings above.
+      </p>
+    </template>
 
     <template v-if="result">
       <div class="test-metrics">
@@ -211,7 +269,10 @@ async function transcribe(kind: 'raw' | 'clean') {
         </span>
         <span class="metric">
           <span class="metric-label">Denoise</span>
-          <span class="metric-value">{{ appliedAlgorithm }}</span>
+          <span class="metric-value">
+            {{ appliedAlgorithm }}
+            <template v-if="result.quality.denoised"> · {{ Math.round(result.strength * 100) }} %</template>
+          </span>
         </span>
         <span class="metric">
           <span class="metric-label">Processing</span>
@@ -223,8 +284,8 @@ async function transcribe(kind: 'raw' | 'clean') {
         <div class="compare-column">
           <span class="compare-title">Original</span>
           <div class="compare-actions">
-            <button class="btn btn-secondary btn-small" @click="play('raw')">
-              Play
+            <button class="btn btn-secondary btn-small" @click="togglePlay('raw')">
+              {{ playing === 'raw' ? 'Stop' : 'Play' }}
             </button>
             <button class="btn btn-secondary btn-small" :disabled="transcribing !== null" @click="transcribe('raw')">
               {{ transcribing === 'raw' ? 'Transcribing...' : 'Transcribe' }}
@@ -238,8 +299,8 @@ async function transcribe(kind: 'raw' | 'clean') {
         <div class="compare-column">
           <span class="compare-title">Cleaned</span>
           <div class="compare-actions">
-            <button class="btn btn-secondary btn-small" @click="play('clean')">
-              Play
+            <button class="btn btn-secondary btn-small" @click="togglePlay('clean')">
+              {{ playing === 'clean' ? 'Stop' : 'Play' }}
             </button>
             <button class="btn btn-secondary btn-small" :disabled="transcribing !== null" @click="transcribe('clean')">
               {{ transcribing === 'clean' ? 'Transcribing...' : 'Transcribe' }}
@@ -250,6 +311,9 @@ async function transcribe(kind: 'raw' | 'clean') {
           </p>
         </div>
       </div>
+
+      <audio ref="rawPlayer" :src="result.raw_audio" preload="auto" class="audio-player" @ended="playing = null" />
+      <audio ref="cleanPlayer" :src="result.clean_audio" preload="auto" class="audio-player" @ended="playing = null" />
     </template>
 
     <p v-if="error" class="test-error">
@@ -306,6 +370,11 @@ async function transcribe(kind: 'raw' | 'clean') {
   gap: 3px;
 }
 
+.apply-strength {
+  min-width: 220px;
+  flex: 1;
+}
+
 .apply-field label {
   font-size: 9px;
   text-transform: uppercase;
@@ -316,6 +385,11 @@ async function transcribe(kind: 'raw' | 'clean') {
 .btn-small {
   padding: 6px 10px;
   font-size: 11px;
+}
+
+.btn-recording {
+  border-color: var(--recording);
+  color: var(--recording);
 }
 
 .test-metrics {
@@ -365,6 +439,10 @@ async function transcribe(kind: 'raw' | 'clean') {
   color: var(--text-strong);
   line-height: 1.4;
   white-space: pre-wrap;
+}
+
+.audio-player {
+  display: none;
 }
 
 .test-error {

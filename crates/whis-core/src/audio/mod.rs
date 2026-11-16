@@ -51,7 +51,7 @@ mod pulse;
 
 // Re-export public types
 pub use chunker::{AudioChunk as ProgressiveChunk, ChunkerConfig, ProgressiveChunker};
-pub use denoise::{ALGORITHMS as DENOISE_ALGORITHMS, DenoiseAlgorithm, DenoiseStrength};
+pub use denoise::{ALGORITHMS as DENOISE_ALGORITHMS, DenoiseAlgorithm};
 pub use devices::list_audio_devices;
 pub use encoder::{AudioEncoder, create_encoder};
 pub use enhance::{

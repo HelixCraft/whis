@@ -1,7 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::io::IsTerminal;
-
 fn main() {
     // Set app_id for Wayland - must be done BEFORE GTK init
     // This is required for GNOME GlobalShortcuts portal to accept our requests
@@ -66,24 +64,11 @@ fn main() {
         return;
     }
 
-    // Warn if launched from terminal as AppImage (shortcuts won't work on Wayland)
-    if is_appimage_from_terminal() {
-        let appimage = std::env::var("APPIMAGE").unwrap();
-        eprintln!("⚠️  For global shortcuts to work on Wayland, install Whis as an app:");
-        eprintln!("   {appimage} --install");
-        eprintln!("   Then launch from your app menu.\n");
-    }
-
     // Check for start-in-tray flag
     let start_in_tray = args.contains(&"--start-in-tray".to_string());
 
     // Start the GUI application
     whis_desktop::run(start_in_tray);
-}
-
-/// Check if we're running as an AppImage launched from a terminal
-fn is_appimage_from_terminal() -> bool {
-    std::env::var("APPIMAGE").is_ok() && std::io::stderr().is_terminal()
 }
 
 /// Install a .desktop file for proper app menu integration

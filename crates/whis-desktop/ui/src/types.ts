@@ -60,6 +60,7 @@ export interface Settings {
     audio_enhance: {
       mode: EnhanceMode
       algorithm: DenoiseAlgorithm
+      strength: number
     }
     chunk_duration_secs: number
     output_method: OutputMethod
@@ -200,12 +201,13 @@ export interface AudioQuality {
 
 // Result of a settings test recording
 export interface AudioTestResult {
-  raw_path: string
-  clean_path: string
   duration_secs: number
   quality: AudioQuality
   mode: EnhanceMode
   algorithm: DenoiseAlgorithm
+  strength: number
+  raw_audio: string
+  clean_audio: string
 }
 
 // Preset info from backend

@@ -12,8 +12,6 @@
 //!   adds a correction term on top of the Wiener gain and is noticeably better
 //!   at keeping quiet consonants intact.
 
-use super::DenoiseStrength;
-
 /// 32 ms analysis window at 16 kHz.
 const FFT_SIZE: usize = 512;
 /// 75 percent overlap keeps the overlap-add artifacts below audibility.
@@ -43,50 +41,36 @@ struct Params {
 }
 
 impl Method {
-    fn params(self, strength: DenoiseStrength) -> Params {
-        match (self, strength) {
-            (Method::Subtraction, DenoiseStrength::Balanced) => Params {
-                oversubtraction: 2.2,
-                beta: 0.04,
+    fn params(self, strength: f32) -> Params {
+        let strength = strength.clamp(0.0, 1.0);
+        // Each parameter interpolates between "barely applied" and the
+        // strongest setting the estimator supports.
+        let between = |low: f32, high: f32| low + (high - low) * strength;
+        match self {
+            Method::Subtraction => Params {
+                oversubtraction: between(1.2, 4.2),
+                beta: between(0.12, 0.002),
                 dd_alpha: 0.0,
-                gain_floor_db: -18.0,
+                gain_floor_db: -between(2.0, 32.0),
             },
-            (Method::Subtraction, DenoiseStrength::Strong) => Params {
-                oversubtraction: 4.0,
-                beta: 0.01,
-                dd_alpha: 0.0,
-                gain_floor_db: -32.0,
-            },
-            (Method::Wiener, DenoiseStrength::Balanced) => Params {
+            Method::Wiener => Params {
                 oversubtraction: 1.0,
                 beta: 0.0,
-                dd_alpha: 0.98,
-                gain_floor_db: -18.0,
+                dd_alpha: between(0.99, 0.93),
+                gain_floor_db: -between(2.0, 32.0),
             },
-            (Method::Wiener, DenoiseStrength::Strong) => Params {
+            Method::MmseLsa => Params {
                 oversubtraction: 1.0,
                 beta: 0.0,
-                dd_alpha: 0.96,
-                gain_floor_db: -32.0,
-            },
-            (Method::MmseLsa, DenoiseStrength::Balanced) => Params {
-                oversubtraction: 1.0,
-                beta: 0.0,
-                dd_alpha: 0.98,
-                gain_floor_db: -18.0,
-            },
-            (Method::MmseLsa, DenoiseStrength::Strong) => Params {
-                oversubtraction: 1.0,
-                beta: 0.0,
-                dd_alpha: 0.96,
-                gain_floor_db: -32.0,
+                dd_alpha: between(0.99, 0.93),
+                gain_floor_db: -between(2.0, 32.0),
             },
         }
     }
 }
 
 /// Denoise in place. Returns false when the buffer is too short to transform.
-pub(super) fn denoise(samples: &mut [f32], method: Method, strength: DenoiseStrength) -> bool {
+pub(super) fn denoise(samples: &mut [f32], method: Method, strength: f32) -> bool {
     if samples.len() < FFT_SIZE {
         return false;
     }
@@ -471,7 +455,7 @@ mod tests {
     #[test]
     fn every_method_reduces_stationary_noise() {
         for method in [Method::Subtraction, Method::Wiener, Method::MmseLsa] {
-            for strength in [DenoiseStrength::Balanced, DenoiseStrength::Strong] {
+            for strength in [0.3f32, 1.0] {
                 let mut samples = white_noise(16000, 0.05, 42);
                 let before = rms(&samples[4000..]);
                 assert!(denoise(&mut samples, method, strength));
@@ -489,7 +473,7 @@ mod tests {
     fn output_stays_finite_and_bounded() {
         for method in [Method::Subtraction, Method::Wiener, Method::MmseLsa] {
             let mut samples = white_noise(8000, 0.9, 11);
-            denoise(&mut samples, method, DenoiseStrength::Strong);
+            denoise(&mut samples, method, 1.0);
             assert!(samples.iter().all(|s| s.is_finite()));
             assert!(samples.iter().all(|s| s.abs() < 1.5));
             assert_eq!(samples.len(), 8000);
@@ -499,10 +483,6 @@ mod tests {
     #[test]
     fn short_buffer_is_ignored() {
         let mut samples = vec![0.1f32; 100];
-        assert!(!denoise(
-            &mut samples,
-            Method::MmseLsa,
-            DenoiseStrength::Balanced
-        ));
+        assert!(!denoise(&mut samples, Method::MmseLsa, 0.5));
     }
 }

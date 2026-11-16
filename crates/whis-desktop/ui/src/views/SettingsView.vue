@@ -205,7 +205,6 @@ const enhanceModeOptions: SelectOption[] = [
   { value: 'light', label: 'Light (recommended)' },
   { value: 'auto', label: 'Auto denoise (only when noisy)' },
   { value: 'denoise', label: 'Denoise always' },
-  { value: 'strong', label: 'Strong denoise' },
 ]
 
 function handleEnhanceModeChange(value: string | null) {
@@ -219,6 +218,15 @@ const denoiseAlgorithm = computed(() => settingsStore.state.ui.audio_enhance.alg
 const denoiseEnabled = computed(() =>
   ['auto', 'denoise', 'strong'].includes(enhanceMode.value),
 )
+
+// Slider value in percent; the backend stores 0.0 to 1.0
+const denoiseStrength = computed(() =>
+  Math.round(settingsStore.state.ui.audio_enhance.strength * 100),
+)
+
+function handleDenoiseStrengthChange(value: number) {
+  settingsStore.setDenoiseStrength(value / 100)
+}
 
 const denoiseAlgorithmOptions: SelectOption[] = [
   { value: 'subtraction', label: 'Spectral subtraction (fastest)' },
@@ -489,6 +497,19 @@ function handleOllamaKeepAliveChange(value: string | null) {
             />
           </div>
 
+          <div v-if="denoiseEnabled" class="field-row">
+            <label>Denoise strength</label>
+            <AppSlider
+              :model-value="denoiseStrength"
+              :min="0"
+              :max="100"
+              :step="5"
+              unit="%"
+              aria-label="Denoise strength"
+              @update:model-value="handleDenoiseStrengthChange"
+            />
+          </div>
+
           <p class="env-hint">
             <span class="hint-marker">[i]</span>
             Light removes rumble and mains hum and lifts quiet speech without changing loud audio.
@@ -498,6 +519,7 @@ function handleOllamaKeepAliveChange(value: string | null) {
           <p v-if="denoiseEnabled" class="env-hint">
             <span class="hint-marker">[i]</span>
             {{ denoiseAlgorithmHint }}
+            0 % is nearly transparent, 100 % is the strongest setting the algorithm supports.
           </p>
 
           <AudioTestCard />

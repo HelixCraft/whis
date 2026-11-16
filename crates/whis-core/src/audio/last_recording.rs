@@ -11,8 +11,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::BufWriter;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::history::{data_dir, now_ms};
@@ -194,6 +193,16 @@ pub fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
     }
 
     let tmp = path.with_extension("wav.tmp");
+    fs::write(&tmp, wav_bytes(samples)?).context("Failed to write recording file")?;
+    fs::rename(&tmp, path).context("Failed to replace recording file")?;
+    Ok(())
+}
+
+/// Encode samples as a 16 kHz mono 16-bit PCM WAV in memory.
+///
+/// Used for in-window playback, where the audio is handed to the webview as a
+/// data URL instead of being opened in an external player.
+pub fn wav_bytes(samples: &[f32]) -> Result<Vec<u8>> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: SAMPLE_RATE,
@@ -201,19 +210,19 @@ pub fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
         sample_format: hound::SampleFormat::Int,
     };
 
-    let file = File::create(&tmp).context("Failed to create recording file")?;
-    let mut writer =
-        hound::WavWriter::new(BufWriter::new(file), spec).context("Failed to create WAV writer")?;
-    for &sample in samples {
-        let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-        writer
-            .write_sample(value)
-            .context("Failed to write audio sample")?;
+    let mut buffer = Vec::new();
+    {
+        let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buffer), spec)
+            .context("Failed to create WAV writer")?;
+        for &sample in samples {
+            let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+            writer
+                .write_sample(value)
+                .context("Failed to write audio sample")?;
+        }
+        writer.finalize().context("Failed to finalize WAV data")?;
     }
-    writer.finalize().context("Failed to finalize WAV file")?;
-
-    fs::rename(&tmp, path).context("Failed to replace recording file")?;
-    Ok(())
+    Ok(buffer)
 }
 
 /// Read a 16 kHz mono WAV file into normalized f32 samples.

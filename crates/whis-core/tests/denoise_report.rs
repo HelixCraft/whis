@@ -1,6 +1,6 @@
 //! Objective comparison harness for the denoise algorithms.
 
-use whis_core::audio::denoise::{ALGORITHMS, DenoiseStrength, denoise};
+use whis_core::audio::denoise::{ALGORITHMS, denoise};
 use whis_core::audio::enhance::{self, EnhanceConfig, EnhanceMode};
 
 const RATE: f32 = 16000.0;
@@ -103,7 +103,7 @@ fn report() {
             "algorithm", "noise dB", "speech dB", "SI-SDR", "ms"
         );
 
-        for strength in [DenoiseStrength::Balanced, DenoiseStrength::Strong] {
+        for strength in [0.3f32, 1.0] {
             for algorithm in ALGORITHMS {
                 let mut buffer = noisy.clone();
                 let started = std::time::Instant::now();
@@ -129,7 +129,7 @@ fn report() {
 
                 println!(
                     "{:<22} {noise_reduction:>10.1} {speech_change:>10.1} {sdr:>10.1} {elapsed:>8.1}",
-                    format!("{:?} {:?}", algorithm, strength).replace("DenoiseStrength::", "")
+                    format!("{} {:.1}", algorithm.as_str(), strength)
                 );
             }
         }
@@ -144,8 +144,9 @@ fn report() {
             let enhanced = enhance::enhance(
                 &noisy,
                 &EnhanceConfig {
-                    mode: EnhanceMode::StrongDenoise,
+                    mode: EnhanceMode::Denoise,
                     algorithm,
+                    strength: 0.5,
                 },
             );
             let elapsed = started.elapsed().as_secs_f32() * 1000.0;

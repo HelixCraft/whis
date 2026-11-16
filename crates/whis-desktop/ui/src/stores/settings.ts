@@ -84,6 +84,7 @@ function getDefaultSettings(): Settings {
       audio_enhance: {
         mode: 'light' as EnhanceMode,
         algorithm: 'mmse-lsa' as DenoiseAlgorithm,
+        strength: 0.5,
       },
       chunk_duration_secs: 90,
       output_method: 'clipboard' as OutputMethod,
@@ -146,6 +147,19 @@ const state = reactive({
     error: null as string | null,
   },
 })
+
+// The old `strong` mode predated the strength slider and always meant maximum.
+function normalizeEnhanceMode(mode?: EnhanceMode): EnhanceMode {
+  if (!mode)
+    return 'light'
+  return mode === 'strong' ? 'denoise' : mode
+}
+
+function clampStrength(value?: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value))
+    return 0.5
+  return Math.min(1, Math.max(0, value))
+}
 
 // Build settings payload for save_settings command
 function buildSettingsPayload(): Settings {
@@ -218,12 +232,17 @@ async function load() {
       cli_push_to_talk: settings.shortcuts?.cli_push_to_talk ?? false,
       desktop_key: settings.shortcuts?.desktop_key || defaults.desktop_key,
     }
+    // The old `strong` mode had no separate strength and always meant maximum.
+    const legacyStrong = settings.ui.audio_enhance?.mode === 'strong'
+    const storedStrength = settings.ui.audio_enhance?.strength
+
     state.ui = {
       clipboard_backend: settings.ui.clipboard_backend,
       microphone_device: settings.ui.microphone_device,
       audio_enhance: {
-        mode: settings.ui.audio_enhance?.mode ?? 'light',
+        mode: normalizeEnhanceMode(settings.ui.audio_enhance?.mode),
         algorithm: settings.ui.audio_enhance?.algorithm ?? 'mmse-lsa',
+        strength: legacyStrong && typeof storedStrength !== 'number' ? 1 : clampStrength(storedStrength),
       },
       chunk_duration_secs: Math.max(10, Math.min(300, settings.ui.chunk_duration_secs ?? 90)),
       output_method: settings.ui.output_method ?? 'clipboard',
@@ -460,6 +479,10 @@ function setDenoiseAlgorithm(value: DenoiseAlgorithm) {
   state.ui.audio_enhance.algorithm = value
 }
 
+function setDenoiseStrength(value: number) {
+  state.ui.audio_enhance.strength = clampStrength(value)
+}
+
 function setBubbleEnabled(value: boolean) {
   state.ui.bubble.enabled = value
 }
@@ -595,6 +618,7 @@ export const settingsStore = {
   setMicrophoneDevice,
   setEnhanceMode,
   setDenoiseAlgorithm,
+  setDenoiseStrength,
   setBubbleEnabled,
   setChunkDuration,
   setKeepModelLoaded,

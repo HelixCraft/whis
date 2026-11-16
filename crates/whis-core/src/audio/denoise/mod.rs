@@ -90,24 +90,25 @@ impl DenoiseAlgorithm {
     }
 }
 
-/// How hard the selected algorithm works.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DenoiseStrength {
-    /// Default; keeps speech natural.
-    Balanced,
-    /// Deeper attenuation, for very noisy recordings.
-    Strong,
-}
-
 /// Run one denoiser in place.
 ///
-/// Returns false when the buffer was too short to process, in which case the
-/// samples are unchanged.
-pub fn denoise(
-    samples: &mut [f32],
-    algorithm: DenoiseAlgorithm,
-    strength: DenoiseStrength,
-) -> bool {
+/// `strength` is a continuous value in `0..=1`: `0` is nearly transparent and
+/// `1` is the maximum attenuation the algorithm can apply. Every algorithm
+/// maps it to its own parameters, so the same slider position means "how much
+/// of this algorithm" rather than a fixed preset.
+///
+/// Returns false when the buffer was too short to process or the strength is
+/// effectively zero, in which case the samples are unchanged.
+pub fn denoise(samples: &mut [f32], algorithm: DenoiseAlgorithm, strength: f32) -> bool {
+    let strength = if strength.is_finite() {
+        strength.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if strength <= 0.001 {
+        return false;
+    }
+
     match algorithm {
         DenoiseAlgorithm::SpectralSubtraction => {
             classical::denoise(samples, classical::Method::Subtraction, strength)

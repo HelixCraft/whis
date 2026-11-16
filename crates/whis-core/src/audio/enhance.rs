@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::audio::ProgressiveChunk;
-use crate::audio::denoise::{self, DenoiseAlgorithm, DenoiseStrength};
+use crate::audio::denoise::{self, DenoiseAlgorithm};
 use crate::resample::WHISPER_SAMPLE_RATE;
 
 /// Sample rate of the pipeline (16 kHz mono).
@@ -101,20 +101,47 @@ impl EnhanceMode {
     }
 }
 
+/// Default denoise strength, applied when settings have no explicit value.
+pub const DEFAULT_STRENGTH: f32 = 0.5;
+
 /// Settings for the audio cleanup chain.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioEnhanceSettings {
     pub mode: EnhanceMode,
     /// Algorithm used when the mode enables denoising.
     pub algorithm: DenoiseAlgorithm,
+    /// How far the selected algorithm works, `0.0..=1.0`.
+    pub strength: f32,
+}
+
+impl Default for AudioEnhanceSettings {
+    fn default() -> Self {
+        Self {
+            mode: EnhanceMode::default(),
+            algorithm: DenoiseAlgorithm::default(),
+            strength: DEFAULT_STRENGTH,
+        }
+    }
 }
 
 /// Snapshot of the cleanup configuration.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct EnhanceConfig {
     pub mode: EnhanceMode,
     pub algorithm: DenoiseAlgorithm,
+    /// How far the selected algorithm works, `0.0..=1.0`.
+    pub strength: f32,
+}
+
+impl Default for EnhanceConfig {
+    fn default() -> Self {
+        Self {
+            mode: EnhanceMode::Off,
+            algorithm: DenoiseAlgorithm::default(),
+            strength: DEFAULT_STRENGTH,
+        }
+    }
 }
 
 impl From<AudioEnhanceSettings> for EnhanceConfig {
@@ -122,6 +149,7 @@ impl From<AudioEnhanceSettings> for EnhanceConfig {
         Self {
             mode: settings.mode,
             algorithm: settings.algorithm,
+            strength: settings.strength,
         }
     }
 }
@@ -131,6 +159,7 @@ impl From<&AudioEnhanceSettings> for EnhanceConfig {
         Self {
             mode: settings.mode,
             algorithm: settings.algorithm,
+            strength: settings.strength,
         }
     }
 }
@@ -316,9 +345,11 @@ pub fn enhance_owned(samples: Vec<f32>, config: &EnhanceConfig) -> Enhanced {
         _ => false,
     };
 
+    // The legacy `strong` mode predates the slider and always used maximum
+    // attenuation; every other denoise mode follows the configured strength.
     let strength = match config.mode {
-        EnhanceMode::StrongDenoise => DenoiseStrength::Strong,
-        _ => DenoiseStrength::Balanced,
+        EnhanceMode::StrongDenoise => 1.0,
+        _ => config.strength,
     };
     let mut denoise_ms = 0.0f32;
     let mut denoise_algorithm = None;
@@ -752,7 +783,16 @@ pub fn enhance_chunk_stream(
 
     tokio::spawn(async move {
         while let Some(chunk) = rx.recv().await {
-            let enhanced = enhance_owned(chunk.samples, &config);
+            // Denoising a full chunk is CPU-bound (tens to hundreds of
+            // milliseconds, more for the neural algorithms). Keep it off the
+            // async workers so the audio pipeline and the UI stay responsive.
+            let enhanced =
+                match tokio::task::spawn_blocking(move || enhance_owned(chunk.samples, &config))
+                    .await
+                {
+                    Ok(enhanced) => enhanced,
+                    Err(_) => break,
+                };
             quality_handle.lock().unwrap().add(&enhanced.stats);
             if enhanced.stats.gated {
                 continue;
@@ -1087,6 +1127,7 @@ mod tests {
                 &EnhanceConfig {
                     mode: EnhanceMode::StrongDenoise,
                     algorithm,
+                    strength: 1.0,
                 },
             );
 

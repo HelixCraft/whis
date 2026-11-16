@@ -161,9 +161,10 @@ pub fn run(start_in_tray: bool) {
             commands::open_data_folder,
             commands::get_last_audio_quality,
             // Audio test commands
-            commands::record_audio_test,
+            commands::start_audio_test_recording,
+            commands::stop_audio_test_recording,
+            commands::cancel_audio_test_recording,
             commands::process_audio_test,
-            commands::play_audio_test,
             commands::transcribe_audio_test,
             // Preset commands
             commands::list_presets,
